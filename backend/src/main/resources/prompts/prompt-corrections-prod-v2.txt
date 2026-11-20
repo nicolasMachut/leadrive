@@ -1,0 +1,623 @@
+⚠️ NE PAS COMMIT. Je veux valider toutes les modifications avant de committer.
+⚠️ Tu dois TOUT faire, ne pas choisir quelles features implémenter. Chaque point est OBLIGATOIRE.
+
+Tu dois appliquer TOUTES les corrections suivantes pour préparer l'application à la mise en production. Lis chaque point, comprends le contexte, et applique les modifications. Ne saute aucun point. En cas de doute, lis les fichiers concernés avant de modifier.
+
+====================================================================
+PARTIE 1, CORRECTIONS BACKEND (SÉCURITÉ + RÉSILIENCE + RGPD)
+====================================================================
+
+## 1. IDEMPOTENCE WEBHOOK TWILIO (CRITIQUE)
+
+Problème : Si Twilio renvoie le même message deux fois (retry sur timeout), on le traite deux fois = doublon de message en base + double appel Anthropic + double réponse WhatsApp au prospect.
+
+Fichier : backend/src/main/java/fr/leadrevive/outreach/controller/WebhookController.java
+
+Correction :
+- Ajouter un cache Caffeine pour stocker les MessageSid déjà traités (TTL 10 minutes)
+- Au début de la méthode qui reçoit les webhooks WhatsApp entrants, vérifier si le MessageSid a déjà été vu
+- Si oui, retourner 200 OK sans traitement
+- Si non, l'ajouter au cache et continuer normalement
+
+Exemple de cache à ajouter dans le controller :
+```java
+private final Cache<String, Boolean> processedMessages = Caffeine.newBuilder()
+    .expireAfterWrite(Duration.ofMinutes(10))
+    .maximumSize(10_000)
+    .build();
+```
+
+Dans la méthode webhook :
+```java
+String messageSid = request.getParameter("MessageSid");
+if (messageSid != null && processedMessages.getIfPresent(messageSid) != null) {
+    return ResponseEntity.ok().build(); // Déjà traité
+}
+if (messageSid != null) {
+    processedMessages.put(messageSid, true);
+}
+```
+
+## 2. FALLBACK QUAND ANTHROPIC EST DOWN (CRITIQUE)
+
+Problème : Quand l'API Anthropic retourne 529 (overloaded) ou timeout, le prospect ne reçoit aucune réponse. Lead perdu silencieusement.
+
+Fichier : backend/src/main/java/fr/leadrevive/outreach/service/WhatsAppConversationService.java
+
+Correction :
+- Dans la méthode qui appelle Anthropic pour générer la réponse IA, ajouter un try-catch autour de l'appel
+- Si exception (timeout, 529, ou autre erreur API) :
+  1. Logger l'erreur avec PiiMasker
+  2. Envoyer un message de fallback au prospect via Twilio : "Merci pour votre message ! Un conseiller va vous recontacter très rapidement."
+  3. Émettre un événement SSE "handoff_humain" pour alerter le vendeur
+  4. Passer la conversation en mode HUMAIN
+  5. NE PAS relancer silencieusement avec Thread.sleep
+
+Le message de fallback doit être envoyé via le même service Twilio que les messages normaux.
+
+## 3. SSL POSTGRESQL
+
+Fichier : backend/src/main/resources/application.yml
+
+Correction : dans la section datasource (profil prod si il existe, sinon section par défaut), ajouter :
+```yaml
+spring:
+  datasource:
+    hikari:
+      data-source-properties:
+        sslmode: require
+```
+
+## 4. RATE LIMITING SUR LES WEBHOOKS
+
+Problème : Les endpoints /api/webhook/** sont en permitAll() sans rate limiting. Un attaquant peut les spammer et déclencher des appels Anthropic (qui coûtent de l'argent).
+
+Fichier : backend/src/main/java/fr/leadrevive/outreach/controller/WebhookController.java
+
+Correction :
+- Ajouter un rate limiter basé sur l'IP : max 30 requêtes par minute par IP
+- Utiliser le même pattern que le RateLimiter existant dans le projet si il y en a un
+- Si pas de rate limiter existant, utiliser un cache Caffeine avec compteur par IP, TTL 1 minute
+- Retourner 429 Too Many Requests si dépassement
+
+## 5. CONSENTEMENT OPT-IN RGPD (CRITIQUE)
+
+Problème : Aucun champ de consentement initial sur le Lead. On envoie des WhatsApp sans preuve de consentement.
+
+Fichier : backend/src/main/java/fr/leadrevive/outreach/model/Lead.java (ou l'entité Lead peu importe le package)
+
+Correction :
+- Ajouter les champs suivants à l'entité Lead :
+```java
+@Column(name = "consentement_contact")
+private Boolean consentementContact;
+
+@Column(name = "consentement_date")
+private LocalDateTime consentementDate;
+
+@Column(name = "consentement_source")
+private String consentementSource; // "csv_import", "formulaire_web", "whatsapp_reply"
+```
+
+- Dans le service d'import CSV : lors de l'import, mettre consentementContact=true, consentementDate=now(), consentementSource="csv_import"
+- Dans le service qui traite les messages WhatsApp entrants : quand un prospect répond pour la première fois, si consentementContact est null, le mettre à true avec source="whatsapp_reply"
+- Dans le service qui envoie les messages WhatsApp sortants : AVANT d'envoyer, vérifier que lead.consentementContact == true. Si false ou null, ne PAS envoyer et logger un warning.
+
+Créer la migration Flyway/Liquibase si le projet utilise des migrations, sinon l'annotation JPA suffira pour la génération auto du schéma.
+
+## 6. EXPORT RGPD COMPLET
+
+Fichier : le service qui gère l'endpoint GET /api/rgpd/prospect/export (probablement RgpdService)
+
+Correction : l'export doit inclure TOUTES les données du prospect :
+- Données du lead (nom, prénom, téléphone, email, marque, modèle, statut, scoring)
+- Toutes les conversations (messages entrants et sortants avec dates)
+- Toutes les analyses IA (signaux, objections, résumé vendeur)
+- Données supplémentaires stockées
+Format : retourner un JSON complet avec toutes ces sections
+
+## 7. ÉMISSION SSE HANDOFF_HUMAIN (BUG #13)
+
+Problème CRITIQUE : Quand besoinHandoff=true dans l'extraction IA, le code (vers ligne 315-324 de ConversationAnalyseService) passe la conversation en mode HUMAIN et insère un message système, MAIS n'émet PAS l'événement SSE "handoff_humain". Le vendeur ne reçoit AUCUNE notification browser. La conversation tombe dans "messages à reprendre" mais personne n'est alerté.
+
+Fichier : backend/src/main/java/fr/leadrevive/outreach/service/ConversationAnalyseService.java
+
+Correction :
+- Trouver le bloc qui gère besoinHandoff=true (là où la conversation passe en mode HUMAIN)
+- Après le save de la conversation et l'insertion du message système, ajouter l'émission SSE :
+```java
+inboxNotificationService.notifierApresCommit(
+    conversation.getTenantId(),
+    "handoff_humain",
+    Map.of(
+        "conversationId", conversation.getId().toString(),
+        "leadId", conversation.getLead().getId().toString(),
+        "nomProspect", conversation.getLead().getPrenom() + " " + conversation.getLead().getNom(),
+        "raison", extraction.getRaisonHandoff() != null ? extraction.getRaisonHandoff() : "Handoff automatique"
+    )
+);
+```
+- Utiliser le même pattern que dans WhatsAppConversationService (vers lignes 360 et 409) qui émet déjà cet événement.
+
+## 8. POOL HIKARICP
+
+Fichier : backend/src/main/resources/application.yml
+
+Ajouter dans la section datasource :
+```yaml
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 25
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+```
+
+## 9. RÉTENTION DES DONNÉES (SCHEDULED JOB)
+
+Créer un nouveau service ou scheduled job :
+- Tourne chaque nuit (ou chaque semaine)
+- Purge les conversations terminées (statut TERMINE, STOP_DEMANDE, REFUSE) de plus de 18 mois
+- Les messages associés doivent aussi être supprimés (cascade)
+- Logger le nombre d'enregistrements purgés
+- Utiliser @Scheduled avec une cron expression
+
+## 10. CONTEXTE GÉOGRAPHIQUE, ADRESSE ET TÉLÉPHONE CONCESSION
+
+Problème : L'IA ne peut pas répondre quand un prospect demande l'adresse ou le téléphone de la concession.
+
+Correction :
+- Dans l'entité de configuration de la concession (TenantAiConfig ou Concession), ajouter deux champs :
+```java
+@Column(name = "adresse_complete")
+private String adresseComplete;
+
+@Column(name = "telephone_concession")
+private String telephoneConcession;
+```
+- Dans le frontend, ajouter ces deux champs dans l'écran de réglages de l'assistant IA (là où le manager configure les marques, horaires, etc.)
+- Dans le prompt de conversation WhatsApp, injecter ces variables : {ADRESSE_CONCESSION} et {TELEPHONE_CONCESSION}
+- Créer la migration DB correspondante si nécessaire
+
+## 11. FLAG CLIENT IRRITÉ
+
+Problème : Quand l'IA détecte un prospect mécontent et rend la main, il n'y a pas de marqueur pour identifier ces leads sensibles.
+
+Correction :
+- Ajouter un champ boolean sur l'entité Lead :
+```java
+@Column(name = "client_irrite")
+private Boolean clientIrrite = false;
+```
+- Dans ConversationAnalyseService, quand le ton prospect est "mecontent" ET que le handoff est déclenché, mettre ce flag à true
+- Dans le frontend inbox, afficher un indicateur visuel (badge rouge par exemple) sur les conversations avec client_irrite=true
+- Créer la migration DB correspondante
+
+====================================================================
+PARTIE 2, CORRECTIONS FRONTEND
+====================================================================
+
+## 12. BUG LAYOUT INBOX (SCROLL DÉCALÉ)
+
+Fichier : frontend/src/app/inbox/page.tsx
+
+Problème : Quand on scrolle tout en bas de la page inbox, tout est décalé.
+
+Correction :
+- Trouver le div racine de la page inbox qui a probablement `className="flex h-full"`
+- Ajouter `overflow-hidden` à ce className
+- Vérifier que les colonnes internes (liste conversations à gauche, conversation à droite) ont chacune leur propre `overflow-y-auto`
+
+Fichier : frontend/src/components/AppLayout.tsx
+- Ligne 51 : le `<main className="flex-1 overflow-y-auto">` peut poser problème pour l'inbox
+- Solution : conditionner le className du main. Si pathname contient "/inbox" → overflow-hidden, sinon overflow-y-auto. Ou bien ajouter overflow-hidden au container inbox et laisser le main tel quel.
+
+## 13. PAGINATION FRONTEND LEADS
+
+Fichier : frontend/src/app/leads/page.tsx (ou équivalent)
+
+Problème : Le frontend charge 1000 leads d'un coup (size=1000). Ça va devenir un problème de performance.
+
+Correction :
+- Remplacer size=1000 par size=50 (ou 25)
+- Ajouter une pagination en bas de la liste (boutons précédent/suivant ou infinite scroll)
+- Les filtres (territoire, marque) doivent être envoyés au backend en query params, pas filtrés côté client après chargement des 1000
+
+====================================================================
+PARTIE 3, CORRECTIONS PROMPTS IA
+====================================================================
+
+IMPORTANT : Lis d'abord le fichier backend/src/main/resources/prompts/whatsapp-conversation.txt en entier avant de faire les modifications. Les corrections doivent s'intégrer au prompt existant sans casser ce qui fonctionne déjà.
+
+## 14. BUG #12 : RECAP CONDITIONNEL
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Problème : Dans la section RECAP FINAL (vers lignes 162-176), les exemples mentionnent toujours "estimation de votre reprise" même si le prospect n'a jamais parlé de reprise.
+
+Correction : modifier la section recap pour la rendre conditionnelle :
+```
+## RECAP FINAL
+Le recap de fin de conversation doit UNIQUEMENT mentionner les éléments réellement abordés pendant la conversation.
+- Si reprise mentionnée → inclure "estimation de votre [véhicule]"
+- Si budget mentionné → inclure "les meilleures conditions dans votre budget"
+- Si financement mentionné → inclure "les options de financement adaptées"
+- Si aucune info donnée → recap générique orienté bénéfice
+Ne JAMAIS mentionner un sujet qui n'a pas été abordé dans la conversation.
+```
+
+## 15. BUG #15 : REFUS CANAL TÉLÉPHONE
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Vérifier que la section "REFUS DU CANAL TELEPHONE" est bien présente et contient :
+- "pas la peine de m'appeler", "je ne veux pas être appelé" = PAS un STOP
+- C'est un refus du canal téléphone uniquement
+- L'IA doit pivoter vers la conversation par message WhatsApp
+- Continuer la découverte par message si le prospect accepte
+
+## 16. FLEXIBILITÉ DÉCOUVERTE Q0-Q4 (BLOQUEUR)
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Problème : L'IA repose des questions auxquelles le prospect a déjà répondu dans un message précédent. Ça frustre le prospect.
+
+Correction : Ajouter une section AVANT la section Q0-Q4 :
+```
+## RÈGLE DE FLEXIBILITÉ Q0-Q4
+AVANT de poser chaque question (Q0, Q1, Q2, Q3, Q4), VÉRIFIER dans l'historique de la conversation si le prospect n'a pas déjà donné cette information dans un message précédent.
+Si l'information est déjà connue :
+- NE PAS reposer la question
+- Passer directement à la question suivante non-répondue
+- Si TOUTES les questions ont déjà été répondues, passer directement au recap final
+
+Exemples :
+- Prospect dit dans un seul message "budget 25k, LOA, j'ai une Clio à reprendre" → sauter Q2, Q3 et Q4
+- Prospect dit "c'est urgent, je dois changer ce mois-ci" → sauter Q0
+```
+
+## 17. ESCALADE PROSPECT MÉCONTENT (BLOQUEUR)
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Problème : L'IA continue son script commercial face à un prospect frustré au lieu de rendre la main.
+
+Correction : Ajouter une section :
+```
+## DÉTECTION DE FRUSTRATION / MÉCONTENTEMENT
+Si le prospect exprime de la frustration forte (exemples : "encore vous", "marre", "arrêtez", "harcèlement", "nul", "arnaque", "personne ne répond jamais") :
+1. NE PAS poser de question commerciale
+2. Envoyer un message d'empathie sincère : "Je comprends votre frustration, c'est tout à fait justifié."
+3. Rendre la main immédiatement au vendeur (handoff humain)
+
+Ne pas mettre trop de barrières : cette règle ne s'applique que pour de la frustration FORTE et explicite, pas pour une simple hésitation ou un ton neutre.
+```
+
+## 18. FORMULATIONS NÉGATIVES PERSISTANTES (BLOQUEUR)
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Renforcer la CORRECTION #1 existante en ajoutant une liste exhaustive :
+```
+## FORMULATIONS INTERDITES (STRICTEMENT)
+Ne JAMAIS utiliser ces expressions, même dans un contexte positif :
+- "pas de souci" → remplacer par "très bien", "entendu", "c'est noté"
+- "pas de problème" → remplacer par "avec plaisir", "bien sûr", "tout à fait"
+- "n'hésitez pas" → remplacer par "je reste disponible" ou "je suis là si besoin"
+- "ne vous inquiétez pas" → remplacer par "vous êtes entre de bonnes mains"
+- "c'est pas grave" → remplacer par "c'est tout à fait normal"
+
+Cette règle est ABSOLUE. Aucune exception.
+```
+
+## 19. VOUVOIEMENT STRICT
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter :
+```
+## REGISTRE DE LANGUE
+TOUJOURS utiliser le VOUVOIEMENT. Même si le prospect tutoie.
+Ne JAMAIS passer au tutoiement, dans aucun cas.
+Maintenir un ton professionnel et respectueux du début à la fin de la conversation.
+```
+
+## 20. GESTION DES MESSAGES EN ANGLAIS
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter :
+```
+## LANGUE DE LA CONVERSATION
+Si le prospect envoie un message en anglais, basculer TOUTE la conversation en anglais.
+Ne pas mélanger français et anglais dans un même message.
+Adapter le script de découverte (Q0-Q4), les confirmations de RDV, et le recap final en anglais.
+Le ton et les règles restent les mêmes, seule la langue change.
+```
+
+## 21. GESTION DES PHOTOS
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter :
+```
+## PHOTOS ET MÉDIAS
+Si le prospect envoie une photo ou un média :
+- Accuser réception : "J'ai bien reçu votre photo, merci !"
+- Préciser que l'IA ne peut pas analyser les images : "Je ne suis pas en mesure d'analyser les images, mais notre conseiller pourra la consulter lors de votre échange."
+- Continuer la conversation normalement.
+
+La photo sera visible dans la conversation côté vendeur.
+```
+
+## 22. GESTION DE L'ESSAI ROUTIER
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter :
+```
+## ESSAI ROUTIER ET OBJECTIF DE CONTACT
+Ne JAMAIS proposer un essai routier de ta propre initiative.
+Si le prospect mentionne un essai ("je veux l'essayer", "essai routier", "test drive") :
+- Noter l'information pour la fiche de préparation IA
+- Répondre : "C'est noté, notre conseiller organisera ça avec vous."
+- NE PAS rentrer dans les détails logistiques de l'essai
+
+Pour mieux qualifier le prospect, poser la question suivante tôt dans la conversation (après la confirmation du créneau) :
+"Pour que notre conseiller prépare au mieux votre échange, vous souhaitez plutôt un appel pour discuter de votre projet, venir voir le véhicule en concession, ou les deux ?"
+
+Adapter la suite en fonction de la réponse (appel = RDV téléphonique, visite = RDV physique, essai = noter pour la fiche).
+```
+
+## 23. GESTION DES MESSAGES COURTS ET AMBIGUS
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter :
+```
+## INTERPRÉTATION DES MESSAGES COURTS
+- "..." (points de suspension) = hésitation/réflexion, PAS un refus. Réponse : "Je vous laisse réfléchir. Quel créneau vous arrangerait ?"
+- "?" seul = demande de clarification. Reformuler la dernière question avec des options claires.
+- "Non" seul = interpréter dans le contexte de la DERNIÈRE question posée. Si ambigu, demander clarification brève. Ne jamais supposer un refus total.
+- "Non merci" après proposition de créneau = refus du créneau, PAS du projet. Rebond : "Quel moment vous arrangerait mieux ?"
+- "Lol", "Mdr", emojis rieurs = signal positif, continuer normalement avec un ton léger.
+- "Bonjour" seul = accuser réception et reformuler la question.
+```
+
+## 24. CONTEXTE GÉOGRAPHIQUE DANS LE PROMPT
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter dans la section contexte de la concession (là où sont les variables {NOM_CONCESSION}, {MARQUES}, etc.) :
+```
+- Adresse : {ADRESSE_CONCESSION}
+- Téléphone : {TELEPHONE_CONCESSION}
+```
+
+Et ajouter une règle :
+```
+## INFORMATIONS PRATIQUES (ADRESSE, TÉLÉPHONE)
+Si le prospect demande l'adresse ou le téléphone de la concession :
+- Si {ADRESSE_CONCESSION} est renseigné, donner l'adresse.
+- Si {TELEPHONE_CONCESSION} est renseigné, donner le numéro.
+- Si l'un ou l'autre est vide ou absent, répondre : "Je n'ai pas cette information sous la main, notre conseiller pourra vous renseigner."
+Ne JAMAIS inventer une adresse ou un numéro.
+```
+
+Fichier : backend, le service qui construit le prompt de conversation
+- S'assurer que les nouvelles variables {ADRESSE_CONCESSION} et {TELEPHONE_CONCESSION} sont injectées dans le prompt à partir de la config de la concession (les champs ajoutés au point 10)
+
+## 25. PROSPECT QUI DIT "JE VOUS RAPPELLE"
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter :
+```
+## PROSPECT QUI INITIE LE RAPPEL
+Si le prospect dit "je vous rappelle" ou "c'est moi qui rappellerai" :
+- Accepter sa proposition
+- Proposer un créneau en filet de sécurité : "Très bien ! Pour être sûr qu'on se rate pas, je peux aussi caler un créneau [jour] à [heure], comme ça si vous n'avez pas eu le temps, notre conseiller vous contacte. Ça vous va ?"
+```
+
+## 26. REFUS BUDGET, REQUALIFICATION DOUCE
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter dans la section Q3 (budget) :
+```
+Si le prospect refuse de donner son budget ("je préfère pas dire", "c'est confidentiel") :
+- Première tentative de requalification : "Je comprends tout à fait. Juste pour orienter notre conseiller, vous cherchez plutôt un budget accessible ou vous êtes ouvert aux versions haut de gamme ?"
+- Si refuse à nouveau : "Très bien, notre conseiller pourra vous proposer plusieurs options." Et passer à Q4.
+- Ne JAMAIS insister plus de deux fois sur le budget.
+```
+
+## 27. MESSAGE INCOMPRÉHENSIBLE / SPAM
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+
+Correction : Ajouter :
+```
+## MESSAGES INCOMPRÉHENSIBLES
+Si le prospect envoie un message sans sens (caractères aléatoires, spam) :
+- Première fois : "Excusez-moi, je n'ai pas bien compris votre message. Pourriez-vous le réécrire ?"
+- Deuxième fois sans réponse compréhensible : ne plus relancer.
+```
+
+====================================================================
+PARTIE 4, CORRECTIONS PROMPT EXTRACTION
+====================================================================
+
+## 28. EXTRACTION, CHAMP ESSAI
+
+Fichier : backend/src/main/resources/prompts/whatsapp-extraction.txt
+
+Correction : si ce n'est pas déjà fait, ajouter dans le JSON d'extraction un champ :
+```json
+"demandeEssai": true | false
+```
+
+Avec la règle :
+```
+"demandeEssai" = true si le prospect mentionne explicitement un essai routier ou un test du véhicule.
+false sinon.
+Ce champ sera utilisé dans la fiche de préparation pour prévenir le commercial.
+```
+
+Vérifier que ce champ est bien récupéré côté Java dans le DTO d'extraction et transmis à la fiche de préparation.
+
+## 29. EXTRACTION, FLAG CLIENT IRRITÉ
+
+Fichier : backend/src/main/resources/prompts/whatsapp-extraction.txt
+
+Vérifier que quand tonProspect = "mecontent" ET besoinHandoff = true, le service Java met bien le flag clientIrrite=true sur le lead (cf. point 11).
+
+====================================================================
+PARTIE 5, SUPPRESSION CONFIG VOUVOIEMENT/TUTOIEMENT
+====================================================================
+
+## 32. SUPPRIMER LE CHOIX VOUVOIEMENT/TUTOIEMENT
+
+Le vouvoiement est désormais obligatoire dans toutes les conversations. Le choix n'a plus lieu d'être.
+
+Fichier : frontend/src/app/admin/config-ia/page.tsx
+- Supprimer le bloc UI qui affiche les boutons "Tutoiement" / "Vouvoiement" (le label "Ton commercial" avec les deux boutons)
+- Supprimer le champ `tonCommercial` du type ConfigIa et de EMPTY_CONFIG
+- Ne plus envoyer ce champ au backend lors de la sauvegarde
+
+Fichier : frontend/src/app/onboarding/page.tsx
+- Même chose : supprimer le champ `tonCommercial` du type, du default, et du formulaire d'onboarding
+- Ne plus envoyer ce champ au backend
+
+Fichier backend : l'entité TenantAiConfig (ou équivalent)
+- Supprimer le champ `tonCommercial` / `ton_commercial` de l'entité JPA
+- Supprimer la colonne de la DB via migration si nécessaire (ou la laisser en base et juste retirer le mapping JPA, au choix)
+
+Fichier : backend/src/main/resources/prompts/whatsapp-conversation.txt
+- Supprimer toute référence à la variable {TON_COMMERCIAL} ou {TUTOIEMENT_VOUVOIEMENT}
+- La règle de vouvoiement strict est déjà ajoutée au point 19
+
+Fichier backend : le service qui construit le prompt de conversation
+- Ne plus injecter la variable tonCommercial dans le prompt
+
+====================================================================
+PARTIE 6, CORRECTIONS DOCKER
+====================================================================
+
+## 33. DOCKER USER NON-ROOT
+
+Fichier : backend/Dockerfile
+
+Avant la dernière instruction CMD ou ENTRYPOINT, ajouter :
+```dockerfile
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+USER appuser
+```
+
+Fichier : frontend/Dockerfile
+Même chose si le Dockerfile frontend tourne en root.
+
+====================================================================
+PARTIE 6, INVESTIGATION BUG #16
+====================================================================
+
+## 34. INVESTIGATION : MESSAGE ENVOYÉ AU MAUVAIS PROSPECT
+
+Problème rapporté : un message destiné à un prospect est arrivé chez un autre.
+
+Investiguer :
+- Dans le WebhookController ou le service qui reçoit les messages entrants Twilio, vérifier comment la conversation est retrouvée à partir du numéro "From"
+- Vérifier s'il y a un risque que deux leads aient le même numéro de téléphone dans des tenants différents
+- Vérifier si le routage utilise bien le tenantId en plus du numéro de téléphone
+- Si tu trouves le bug, corriger. Sinon, documenter les findings dans un commentaire TODO.
+
+====================================================================
+PARTIE 7, SUPPRESSION RAPPEL VEILLE + CORRECTIONS ONBOARDING + ACCENTS
+====================================================================
+
+## 35. SUPPRIMER LE RAPPEL DE LA VEILLE (VEILLE À 18H)
+
+On ne garde qu'un seul rappel : 1h avant le RDV (JOUR_J). Le rappel de la veille à 18h est supprimé.
+
+Fichier : backend/src/main/java/fr/leadrevive/outreach/entity/TypeRappelEnum.java
+- Supprimer la valeur VEILLE de l'enum. Ne garder que JOUR_J (et les autres valeurs s'il y en a d'autres qui ne sont pas liées à la veille).
+
+Fichier : backend/src/main/java/fr/leadrevive/outreach/service/RappelRdvService.java
+- Ligne ~49 : il y a une variable ou constante qui définit l'heure du rappel veille (probablement 18:00). La supprimer.
+- Lignes ~88-91 : il y a un bloc qui planifie le rappel VEILLE (scheduling du rappel la veille à 18h). Supprimer tout ce bloc.
+- Ne garder QUE la logique du rappel JOUR_J (1h avant le RDV).
+- Vérifier que le template WhatsApp pour le rappel JOUR_J est bien configuré (message de rappel 1h avant).
+
+Fichier : tous les autres fichiers qui référencent TypeRappelEnum.VEILLE ou "VEILLE"
+- Chercher dans tout le backend les usages de VEILLE et les supprimer/adapter.
+- Si il y a des tests qui testent le rappel VEILLE, les supprimer ou les adapter.
+
+## 36. CORRIGER LES ACCENTS MANQUANTS DANS TOUTE L'INTERFACE
+
+Problème : Il manque des accents français dans beaucoup de textes de l'interface. Ça fait pas professionnel. Par exemple "e" au lieu de "é", "a" au lieu de "à", etc.
+
+Correction : Scanner TOUS les fichiers .tsx du frontend et corriger chaque texte affiché à l'utilisateur (labels, titres, placeholders, messages, descriptions, boutons, tooltips) pour s'assurer que les accents français sont corrects.
+
+Zones prioritaires à vérifier :
+- frontend/src/app/onboarding/page.tsx, tous les textes de l'onboarding
+- frontend/src/app/admin/config-ia/page.tsx, tous les labels de configuration
+- frontend/src/components/, sidebar, menus, headers
+- frontend/src/app/dashboard/, textes du tableau de bord
+- frontend/src/app/leads/, colonnes, labels, messages
+- frontend/src/app/inbox/, messages système, labels
+- Tous les autres fichiers .tsx avec du texte en français
+
+Exemples de corrections typiques :
+- "Parametres" → "Paramètres"
+- "Reglages" → "Réglages"
+- "Numero" → "Numéro"
+- "Etape" → "Étape"
+- "Déja" → "Déjà"
+- "a" (préposition) → "à"
+- "ou" (conjonction) vs "où" (lieu), vérifier chaque usage
+- "Resume" → "Résumé"
+
+Ne pas toucher aux noms de variables, de champs JSON, de routes, ou de classes CSS. Uniquement les textes visibles par l'utilisateur.
+
+## 37. REMPLACER L'IMPORT CSV DE L'ONBOARDING PAR LE COMPOSANT D'IMPORT COMPLET
+
+Fichier : frontend/src/app/onboarding/page.tsx
+
+Problème : L'étape d'import de leads dans l'onboarding ne propose qu'un simple upload CSV. On veut le MÊME composant d'import complet que sur la page "ajouter un prospect" (probablement dans frontend/src/app/leads/ ou frontend/src/components/).
+
+Correction :
+- Trouver le composant d'import utilisé sur la page d'ajout de prospect (celui qui gère CSV, Excel, copier-coller, etc., tous les types d'import)
+- Remplacer l'étape CSV de l'onboarding par ce même composant
+- S'assurer que tous les types d'import fonctionnent dans le contexte de l'onboarding (le tenantId doit être disponible à cette étape)
+- Le style doit s'intégrer visuellement dans le flow d'onboarding
+
+## 38. BUG : REDIRECTION VERS L'ONBOARDING APRÈS AVOIR TERMINÉ
+
+Fichier : frontend/src/components/AppLayout.tsx
+
+Problème : Après avoir terminé l'onboarding, quand l'utilisateur clique sur l'onglet "pilotage" (ou tout autre onglet que "dashboard"), il est redirigé vers l'onboarding alors qu'il est terminé.
+
+Cause probable, ligne 26 :
+```javascript
+if (me && role === "MANAGER" && !me.onboardingTermine && pathname === "/dashboard")
+```
+
+Ce code ne redirige vers l'onboarding que depuis "/dashboard". MAIS le problème est probablement inversé : la condition `pathname === "/dashboard"` fait que le redirect ne marche QUE depuis /dashboard. Or le vrai bug c'est que onboardingTermine n'est pas mis à true correctement après la fin de l'onboarding, OU que le check est fait au mauvais endroit.
+
+Correction :
+1. D'abord, vérifier dans le service backend comment onboardingTermine est mis à true. Vérifier que l'appel API fait par l'onboarding à la dernière étape met bien ce flag à true en base.
+2. Si le flag est bien mis à true : le problème est peut-être que le frontend ne rafraîchit pas les données utilisateur après l'onboarding. S'assurer que après le redirect final de l'onboarding, le useUser() ou le hook équivalent refait un appel API pour récupérer le nouveau état.
+3. Si le flag n'est PAS mis à true : trouver pourquoi et corriger.
+4. Tester le flow complet : onboarding → dernière étape → clic sur "pilotage" → doit afficher la page pilotage, PAS l'onboarding.
+
+Note : la condition de redirection devrait probablement être élargie pour ne pas être limitée à pathname === "/dashboard", elle devrait rediriger depuis N'IMPORTE quelle page sauf /onboarding si onboardingTermine est false. Mais d'abord, s'assurer que le flag fonctionne.
+
+====================================================================
+FIN, VÉRIFICATIONS
+====================================================================
+
+Après toutes les modifications :
+1. Vérifier que le projet compile (mvn compile ou gradle build)
+2. Vérifier que les tests existants passent toujours
+3. Lister tous les fichiers modifiés avec un git diff --stat
+4. NE PAS COMMIT, attendre validation

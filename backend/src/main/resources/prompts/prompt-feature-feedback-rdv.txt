@@ -1,0 +1,618 @@
+⚠️ NE PAS COMMIT. Je veux valider toutes les modifications avant de committer.
+⚠️ Tu dois TOUT faire. Chaque point est OBLIGATOIRE.
+
+Tu dois implémenter un système de feedback post-RDV intégré dans l'action existante "Effectué". Le vendeur ne doit PAS avoir l'impression de remplir un formulaire, il clôture son RDV avec 2 taps, et on collecte de la donnée en même temps.
+
+3 RÈGLES D'OR À RESPECTER DANS TOUTE L'IMPLÉMENTATION :
+1. JAMAIS mentir au vendeur (même pour le motiver), les chiffres doivent être réels
+2. RÉCOMPENSER > PUNIR, friction douce, jamais de blocage
+3. MONTRER L'IMPACT RÉEL, le vendeur doit voir que son feedback sert à quelque chose
+
+====================================================================
+PARTIE 1, BACKEND
+====================================================================
+
+## 1. CRÉER L'ENTITÉ FEEDBACK RDV
+
+Créer le fichier : backend/src/main/java/.../outreach/entity/FeedbackRdv.java (ou dans le package approprié)
+
+```java
+@Entity
+@Table(name = "feedback_rdv")
+@Getter @Setter
+public class FeedbackRdv extends BaseEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "id_feedback_rdv")
+    private Long id;
+
+    @Column(name = "tenant_id", nullable = false)
+    private Long tenantId;
+
+    @Column(name = "lead_id", nullable = false)
+    private Long leadId;
+
+    @Column(name = "rdv_id")
+    private Long rdvId;
+
+    @Column(name = "vendeur_id", nullable = false)
+    private Long vendeurId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "qualite_qualification")
+    private QualiteQualificationEnum qualiteAppel;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "suite_prevue")
+    private SuitePrevueEnum suitePrevue;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "raison_abandon")
+    private RaisonAbandonEnum raisonAbandon;
+}
+```
+
+## 2. CRÉER LES ENUMS
+
+Créer les fichiers dans le même package :
+
+```java
+public enum QualiteQualificationEnum {
+    CHAUD,    // 🔥 Prospect très bien qualifié, correspondait parfaitement à la fiche IA
+    OK,       // 👍 Qualification correcte, pas de mauvaise surprise
+    RATE      // 😕 Mal qualifié, prospect ne correspondait pas à ce que l'IA avait décrit
+}
+
+public enum SuitePrevueEnum {
+    DEVIS_ENVOYE,
+    ESSAI_PREVU,
+    RELANCER,
+    PERDU
+}
+
+public enum RaisonAbandonEnum {
+    NO_SHOW,
+    PROSPECT_ANNULE,
+    DOUBLON,
+    AUTRE
+}
+```
+
+## 3. CRÉER LE REPOSITORY
+
+```java
+public interface FeedbackRdvRepository extends JpaRepository<FeedbackRdv, Long> {
+    List<FeedbackRdv> findByTenantId(Long tenantId);
+    Optional<FeedbackRdv> findByRdvId(Long rdvId);
+    long countByTenantIdAndQualiteAppelIn(Long tenantId, List<QualiteQualificationEnum> qualites);
+    long countByTenantIdAndQualiteAppelIsNotNull(Long tenantId);
+}
+```
+
+## 4. CRÉER LES DTOs DE REQUÊTE
+
+```java
+@Getter @Setter @NoArgsConstructor @AllArgsConstructor
+public class ReqFeedbackRdvDto {
+    private Long leadId;
+    private Long rdvId; // nullable
+    @NotNull
+    private String qualiteAppel; // "CHAUD", "OK", "RATE"
+    @NotNull
+    private String suitePrevue; // "DEVIS_ENVOYE", "ESSAI_PREVU", "RELANCER", "PERDU"
+}
+```
+
+Et un DTO pour l'abandon :
+```java
+@Getter @Setter @NoArgsConstructor @AllArgsConstructor
+public class ReqAbandonRdvDto {
+    private Long leadId;
+    private Long rdvId;
+    @NotNull
+    private String raisonAbandon; // "NO_SHOW", "PROSPECT_ANNULE", "DOUBLON", "AUTRE"
+}
+```
+
+## 5. CRÉER LE DTO DE RÉPONSE AVEC SYSTÈME DE PALIERS
+
+⚠️ IMPORTANT : Pas de pourcentage fictif ni de delta inventé.
+Le système utilise un compteur réel + des paliers honnêtes.
+
+```java
+@Getter @Builder
+public class RepFeedbackRdvDto {
+    private Long feedbackId;
+    private int totalFeedbacks;       // Nombre total de feedbacks donnés par cette concession
+    private int precisionIa;          // Pourcentage 0-100, UNIQUEMENT si totalFeedbacks >= 20
+    private boolean precisionVisible; // true seulement si totalFeedbacks >= 20
+    private String palierActuel;      // Emoji + nom du palier actuel
+    private String palierSuivant;     // Emoji + nom du prochain palier (null si dernier palier)
+    private int feedbacksRestantsPalier; // Combien de feedbacks avant le prochain palier
+}
+```
+
+Paliers (basés sur le nombre RÉEL de feedbacks de la concession) :
+- 🌱 Premiers pas (0-4 feedbacks), "Votre IA commence à apprendre"
+- 🌿 En croissance (5-14), "Votre IA prend ses marques"
+- 🌳 Fiable (15-29), "Votre IA vous connaît bien"
+- ⭐ Expert (30-49), "Votre IA est affûtée"
+- 🏆 Maître (50+), "Votre IA est redoutable"
+
+## 6. CRÉER LE SERVICE
+
+Créer FeedbackRdvService avec :
+
+```java
+@Service
+@RequiredArgsConstructor
+public class FeedbackRdvService {
+
+    private final FeedbackRdvRepository feedbackRdvRepository;
+    private final AuthService authService;
+
+    // Définition des paliers
+    private static final int[][] PALIERS = {
+        {0, 4},    // 🌱 Premiers pas
+        {5, 14},   // 🌿 En croissance
+        {15, 29},  // 🌳 Fiable
+        {30, 49},  // ⭐ Expert
+        {50, Integer.MAX_VALUE} // 🏆 Maître
+    };
+    private static final String[] PALIERS_EMOJI = {"🌱", "🌿", "🌳", "⭐", "🏆"};
+    private static final String[] PALIERS_NOM = {"Premiers pas", "En croissance", "Fiable", "Expert", "Maître"};
+    private static final String[] PALIERS_DESC = {
+        "Votre IA commence à apprendre",
+        "Votre IA prend ses marques",
+        "Votre IA vous connaît bien",
+        "Votre IA est affûtée",
+        "Votre IA est redoutable"
+    };
+
+    // Seuil minimum pour afficher le % de précision
+    private static final int SEUIL_PRECISION_VISIBLE = 20;
+
+    @Transactional
+    public RepFeedbackRdvDto enregistrerFeedback(ReqFeedbackRdvDto request) {
+        Long tenantId = authService.getCurrentTenantId();
+        Long vendeurId = authService.getCurrentUserId();
+
+        FeedbackRdv feedback = new FeedbackRdv();
+        feedback.setTenantId(tenantId);
+        feedback.setLeadId(request.getLeadId());
+        feedback.setRdvId(request.getRdvId());
+        feedback.setVendeurId(vendeurId);
+        feedback.setQualiteAppel(QualiteQualificationEnum.valueOf(request.getQualiteAppel()));
+        feedback.setSuitePrevue(SuitePrevueEnum.valueOf(request.getSuitePrevue()));
+
+        feedbackRdvRepository.save(feedback);
+
+        // Calculer les infos de palier
+        long total = feedbackRdvRepository.countByTenantIdAndQualiteAppelIsNotNull(tenantId);
+        int totalInt = (int) total;
+
+        // Trouver le palier actuel
+        int palierIndex = 0;
+        for (int i = 0; i < PALIERS.length; i++) {
+            if (totalInt >= PALIERS[i][0] && totalInt <= PALIERS[i][1]) {
+                palierIndex = i;
+                break;
+            }
+        }
+
+        // Calculer feedbacks restants pour prochain palier
+        int feedbacksRestants = 0;
+        String palierSuivant = null;
+        if (palierIndex < PALIERS.length - 1) {
+            feedbacksRestants = PALIERS[palierIndex + 1][0] - totalInt;
+            palierSuivant = PALIERS_EMOJI[palierIndex + 1] + " " + PALIERS_NOM[palierIndex + 1];
+        }
+
+        // Précision IA : uniquement si assez de données
+        boolean precisionVisible = totalInt >= SEUIL_PRECISION_VISIBLE;
+        int precision = precisionVisible ? calculerPrecisionIa(tenantId) : 0;
+
+        return RepFeedbackRdvDto.builder()
+                .feedbackId(feedback.getId())
+                .totalFeedbacks(totalInt)
+                .precisionIa(precision)
+                .precisionVisible(precisionVisible)
+                .palierActuel(PALIERS_EMOJI[palierIndex] + " " + PALIERS_NOM[palierIndex])
+                .palierSuivant(palierSuivant)
+                .feedbacksRestantsPalier(feedbacksRestants)
+                .build();
+    }
+
+    @Transactional
+    public void enregistrerAbandon(ReqAbandonRdvDto request) {
+        Long tenantId = authService.getCurrentTenantId();
+        Long vendeurId = authService.getCurrentUserId();
+
+        FeedbackRdv feedback = new FeedbackRdv();
+        feedback.setTenantId(tenantId);
+        feedback.setLeadId(request.getLeadId());
+        feedback.setRdvId(request.getRdvId());
+        feedback.setVendeurId(vendeurId);
+        feedback.setRaisonAbandon(RaisonAbandonEnum.valueOf(request.getRaisonAbandon()));
+
+        feedbackRdvRepository.save(feedback);
+    }
+
+    @Transactional(readOnly = true)
+    public int calculerPrecisionIa(Long tenantId) {
+        long positifs = feedbackRdvRepository.countByTenantIdAndQualiteAppelIn(
+                tenantId, List.of(QualiteQualificationEnum.CHAUD, QualiteQualificationEnum.OK));
+        long total = feedbackRdvRepository.countByTenantIdAndQualiteAppelIsNotNull(tenantId);
+        if (total == 0) return 0;
+        return (int) Math.round((double) positifs / total * 100);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> getStatsPrecision(Long tenantId) {
+        long total = feedbackRdvRepository.countByTenantIdAndQualiteAppelIsNotNull(tenantId);
+        int totalInt = (int) total;
+        boolean precisionVisible = totalInt >= SEUIL_PRECISION_VISIBLE;
+
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("totalFeedbacks", totalInt);
+        stats.put("precisionVisible", precisionVisible);
+
+        if (precisionVisible) {
+            stats.put("precisionIa", calculerPrecisionIa(tenantId));
+        }
+
+        // Palier actuel
+        int palierIndex = 0;
+        for (int i = 0; i < PALIERS.length; i++) {
+            if (totalInt >= PALIERS[i][0] && totalInt <= PALIERS[i][1]) {
+                palierIndex = i;
+                break;
+            }
+        }
+        stats.put("palierActuel", PALIERS_EMOJI[palierIndex] + " " + PALIERS_NOM[palierIndex]);
+        stats.put("palierDescription", PALIERS_DESC[palierIndex]);
+
+        return stats;
+    }
+}
+```
+
+## 7. CRÉER LE CONTROLLER
+
+Ajouter les endpoints dans le controller existant qui gère les RDV, ou créer un nouveau :
+
+```java
+@RestController
+@RequestMapping("/api/feedback")
+@RequiredArgsConstructor
+@PreAuthorize("isAuthenticated()")
+public class FeedbackRdvController {
+
+    private final FeedbackRdvService feedbackRdvService;
+    private final AuthService authService;
+
+    @PostMapping("/rdv")
+    public RepFeedbackRdvDto feedbackRdv(@RequestBody @Valid ReqFeedbackRdvDto request) {
+        return feedbackRdvService.enregistrerFeedback(request);
+    }
+
+    @PostMapping("/abandon")
+    public ResponseEntity<Void> abandonRdv(@RequestBody @Valid ReqAbandonRdvDto request) {
+        feedbackRdvService.enregistrerAbandon(request);
+        return ResponseEntity.ok().build();
+    }
+
+    @GetMapping("/precision-ia")
+    public Map<String, Object> precisionIa() {
+        Long tenantId = authService.getCurrentTenantId();
+        return feedbackRdvService.getStatsPrecision(tenantId);
+    }
+}
+```
+
+## 8. MIGRATION DB
+
+Créer la migration (Flyway ou Liquibase selon ce que le projet utilise, sinon laisser JPA auto-generate) pour la table feedback_rdv avec les colonnes :
+- id_feedback_rdv BIGSERIAL PRIMARY KEY
+- tenant_id BIGINT NOT NULL REFERENCES ...
+- lead_id BIGINT NOT NULL
+- rdv_id BIGINT
+- vendeur_id BIGINT NOT NULL
+- qualite_qualification VARCHAR(20)
+- suite_prevue VARCHAR(20)
+- raison_abandon VARCHAR(20)
+- created_at TIMESTAMP DEFAULT NOW()
+- updated_at TIMESTAMP DEFAULT NOW()
+
+====================================================================
+PARTIE 2, FRONTEND, COMPOSANTS FEEDBACK
+====================================================================
+
+## 9. CRÉER LE COMPOSANT FEEDBACK SLIDE-UP
+
+Créer : frontend/src/components/feedback/FeedbackRdvSlideUp.tsx
+
+Ce composant est un modal slide-up (bottom sheet) qui apparaît quand le vendeur clique sur "Effectué".
+
+Props :
+```tsx
+interface FeedbackRdvSlideUpProps {
+  leadId: number;
+  rdvId?: number;
+  nomProspect: string;
+  onClose: () => void;
+  onSubmit: () => void; // appelé après envoi réussi, pour refresh la liste
+}
+```
+
+Design :
+- Le composant est un overlay semi-transparent avec un panneau blanc qui slide depuis le bas
+- Animation CSS : translateY(100%) → translateY(0) en 200ms ease-out
+- Barre de poignée grise en haut (rectangle 40x4px arrondi)
+- Swipe down pour fermer (optionnel, peut être simplifié à un bouton X)
+
+Contenu en 2 étapes + écran de confirmation :
+
+ÉTAPE 1, "Le RDV avec {nomProspect}, l'IA avait bien qualifié ?"
+- 3 gros boutons emoji côte à côte dans une row :
+  - 🔥 "Parfait", fond vert clair (bg-green-50 border-green-200), le prospect correspondait parfaitement à la fiche IA
+  - 👍 "Correct", fond jaune clair (bg-yellow-50 border-yellow-200), qualification OK, pas de surprise
+  - 😕 "À côté", fond rouge clair (bg-red-50 border-red-200), le prospect ne correspondait pas à la fiche IA
+- Le bouton sélectionné a une bordure plus épaisse et un fond plus marqué
+- Au clic, passe à l'étape 2
+
+ÉTAPE 2, "Suite prévue ?"
+- 4 badges en grid 2x2 :
+  - 📋 "Devis envoyé", fond violet clair
+  - 🚗 "Essai prévu", fond vert clair
+  - 📞 "Relancer", fond jaune clair
+  - ❌ "Perdu", fond rouge clair
+- Au clic, envoie le feedback à l'API POST /api/feedback/rdv
+
+ÉTAPE 3, CONFIRMATION (affichée 2 secondes puis ferme automatiquement)
+⚠️ L'affichage dépend du nombre de feedbacks (totalFeedbacks renvoyé par l'API) :
+
+CAS A, Moins de 20 feedbacks (precisionVisible = false) :
+  - ✅ "RDV clôturé !"
+  - Afficher le palier actuel avec son emoji : ex. "🌿 En croissance"
+  - Barre de progression vers le prochain palier
+  - Texte : "Encore {feedbacksRestantsPalier} retours pour atteindre {palierSuivant}"
+  - Sous-texte discret : "Votre IA a appris de {totalFeedbacks} échanges"
+
+CAS B, 20+ feedbacks (precisionVisible = true) :
+  - ✅ "RDV clôturé !"
+  - Barre de progression circulaire ou linéaire avec le % de précision IA RÉEL
+  - Texte : "Précision de votre IA : {precisionIa}%"
+  - Palier actuel affiché en badge : ex. "🌳 Fiable"
+  - Si prochain palier existe : "Encore {feedbacksRestantsPalier} retours pour {palierSuivant}"
+
+CAS SPÉCIAL, Passage de palier (quand feedbacksRestantsPalier était 1 avant ce feedback) :
+  - 🎉 Animation légère (confetti CSS ou pulse)
+  - "Nouveau palier débloqué ! {palierActuel}"
+  - Bref descriptif du palier
+
+- Puis se ferme automatiquement après 2s et appelle onSubmit()
+
+Utiliser les CSS variables du projet (--foreground, --card, --border, --muted, etc.).
+Utiliser useApiClient() et l'API_BASE existants pour l'appel API (même pattern que HelpBubble.tsx).
+
+## 10. CRÉER LE COMPOSANT ABANDON MODAL
+
+Créer : frontend/src/components/feedback/AbandonRdvModal.tsx
+
+Modal simple qui apparaît quand le vendeur clique sur "Abandonner".
+
+Contenu :
+- Titre : "Pourquoi abandonner ce RDV ?"
+- 4 boutons :
+  - 🚫 "No-show" (le prospect ne s'est pas présenté)
+  - ❌ "Prospect a annulé"
+  - 👥 "Doublon"
+  - ❓ "Autre"
+- Au clic, envoie à POST /api/feedback/abandon puis ferme le modal
+
+====================================================================
+PARTIE 3, FRONTEND, FRICTION DOUCE SUR RDV NON CLÔTURÉS
+====================================================================
+
+## 11. MODIFIER LA CARTE RDV DANS LE DASHBOARD
+
+Fichier : chercher le composant qui affiche la carte RDV dans le dashboard.
+
+⚠️ RÈGLE : JAMAIS bloquer le vendeur. La friction est VISUELLE, pas fonctionnelle.
+
+A) BADGE COMPTEUR, RDV non clôturés :
+- Si le vendeur a des RDV passés non clôturés (date < maintenant, statut ni "effectué" ni "abandonné"), afficher un badge rouge sur l'icône RDV ou dans le header :
+  - Badge : pastille rouge avec le nombre (ex: "3")
+  - Si > 0 : le badge est visible en permanence
+  - Au clic sur le badge : scroll vers la section des RDV non clôturés
+
+B) TRI PRIORITAIRE, RDV passés en premier :
+- Dans la liste des RDV, les RDV passés non clôturés apparaissent EN PREMIER
+- Style visuel différencié : fond légèrement rosé/orangé (bg-orange-50/50 ou bg-amber-50/50) avec une fine bordure orange
+- Indicateur textuel discret : "En attente de clôture" avec horloge ⏰
+- PLUS le RDV est ancien, plus la couleur est marquée (opacity progressive : 1 jour = 10%, 3 jours = 30%, 7 jours = 50%)
+
+C) MICRO-ANIMATION sur les cartes non clôturées :
+- Au chargement du dashboard, les cartes non clôturées font un léger "pulse" d'attention (1 seule fois, subtle)
+- Le bouton "Effectué" sur ces cartes est légèrement plus visible (couleur accent au lieu de neutre)
+
+D) AUCUN BLOCAGE :
+- Le vendeur peut toujours naviguer librement
+- Aucun modal forcé, aucun tooltip intrusif
+- Pas de message culpabilisant type "Vous avez X RDV en retard !"
+
+## 12. INTÉGRER LE FEEDBACK DANS LE FLOW "EFFECTUÉ"
+
+Fichier : chercher le composant qui affiche la carte RDV dans le dashboard (là où il y a les boutons "Effectué", "Reprogrammer", "Abandonner").
+
+Modifications :
+- Quand le vendeur clique sur "Effectué" → au lieu de directement marquer le RDV comme effectué, OUVRIR le FeedbackRdvSlideUp. Le RDV est marqué effectué APRÈS le feedback (ou si le vendeur ferme sans répondre).
+- Quand le vendeur clique sur "Abandonner" → ouvrir le AbandonRdvModal au lieu de l'action directe.
+
+Le flow devient :
+1. Clic "Effectué" → FeedbackRdvSlideUp s'ouvre
+2. Vendeur fait ses 2 taps → API feedback + API marquer RDV effectué
+3. Animation de confirmation 2s → ferme → refresh liste
+
+⚠️ IMPORTANT : Si le vendeur ferme le slide-up SANS donner de feedback (clic X, swipe down, clic overlay), le RDV est QUAND MÊME marqué comme effectué. On ne bloque JAMAIS. Le feedback est fortement encouragé mais jamais obligatoire.
+
+## 13. INTÉGRER DANS LA FICHE PROSPECT
+
+Si les boutons "Effectué"/"Abandonner" existent aussi sur la fiche prospect individuelle (page lead detail), y intégrer les mêmes modals.
+
+====================================================================
+PARTIE 4, FRONTEND, DASHBOARD MANAGER (PRÉCISION IA)
+====================================================================
+
+## 14. AFFICHER LES STATS IA DANS LE DASHBOARD MANAGER
+
+Fichier : le composant dashboard du manager.
+
+Ajouter un petit encart (card), contenu ADAPTATIF selon le nombre de feedbacks :
+
+Appeler GET /api/feedback/precision-ia au chargement.
+
+CAS A, Moins de 20 feedbacks :
+- Titre : "Apprentissage IA"
+- Palier actuel avec emoji : ex. "🌿 En croissance"
+- Barre de progression vers le prochain palier
+- Texte : "Votre IA a appris de {totalFeedbacks} retours vendeurs"
+- Sous-texte : "Encore {N} retours pour que la précision soit mesurable"
+- Couleur : bleu/neutre (pas de jugement, on n'a pas assez de données)
+
+CAS B, 20+ feedbacks :
+- Titre : "Précision de votre IA"
+- Barre de progression circulaire ou linéaire avec le pourcentage RÉEL
+- Palier affiché en badge
+- Texte sous la barre : "Basé sur {totalFeedbacks} retours vendeurs"
+- Couleur : verte si > 70%, orange si 50-70%, rouge si < 50%
+
+====================================================================
+PARTIE 5, FRONTEND, ENRICHISSEMENT BRIEFING (PAS DE BLOCAGE)
+====================================================================
+
+## 15. AJOUTER UNE SECTION BONUS AU BRIEFING MANAGER
+
+⚠️ Le briefing n'est JAMAIS bloqué ni dégradé. Il est ENRICHI quand des feedbacks existent.
+
+Fichier : chercher le composant de briefing manager (la section qui affiche le briefing quotidien).
+
+Si des feedbacks existent pour ce tenant :
+- Ajouter une section BONUS en bas du briefing existant (après le contenu habituel)
+- Titre de la section : "💡 Insights de vos retours"
+- Contenu (exemples, adapter selon les données disponibles) :
+  - "Sur les {N} derniers RDV, {X}% étaient bien qualifiés par l'IA"
+  - Si taux de "RATE" élevé (> 30%) : "Attention : {Y} vendeurs ont signalé des écarts de qualification. L'IA a besoin de plus de contexte sur vos critères."
+  - Si taux de "PERDU" élevé : "{Z}% des RDV aboutissent à un 'Perdu', vérifiez les critères de scoring"
+- Style : fond légèrement teinté (bg-blue-50/50), bordure discrète, clairement identifié comme section bonus
+- Si aucun feedback n'existe : la section n'apparaît PAS (pas de message vide)
+
+====================================================================
+PARTIE 6, FRONTEND, FEEDBACK LOOP VISIBLE (FIX #4)
+====================================================================
+
+## 16. NOTIFICATION D'IMPACT APRÈS FEEDBACK NÉGATIF
+
+Quand un vendeur donne un feedback 😕 "À côté", il doit VOIR que son retour a eu un impact.
+
+Implémentation côté BACKEND :
+- Ajouter un champ `impact_notifie` (BOOLEAN DEFAULT FALSE) à la table feedback_rdv
+- Créer un endpoint GET /api/feedback/impacts-en-attente qui retourne les feedbacks 😕 de plus de 7 jours pour lesquels impact_notifie = false
+- Créer un endpoint POST /api/feedback/{id}/impact-vu pour marquer la notification comme vue
+
+Implémentation côté FRONTEND :
+- Au chargement du dashboard vendeur, appeler GET /api/feedback/impacts-en-attente
+- Pour chaque impact non notifié, afficher une notification toast ou une petite card :
+  - Style : fond vert clair, icône ✅
+  - Texte : "Suite à votre retour sur {nomProspect}, l'IA ajuste ses critères de qualification. Merci !"
+  - Bouton "OK" ou auto-dismiss après 5 secondes
+  - Au dismiss, appeler POST /api/feedback/{id}/impact-vu
+- Maximum 1 notification affichée à la fois (les autres en file d'attente)
+- Ne s'affiche qu'UNE SEULE FOIS par feedback
+
+⚠️ NOTE : au Niveau 1 (MVP), l'IA n'ajuste pas réellement ses critères (c'est le Niveau 3). Le message est formulé au futur proche ("ajuste ses critères") ce qui est honnête, les données sont collectées et SERONT utilisées. Ne PAS dire "l'IA s'est améliorée" si ce n'est pas encore le cas.
+
+Message alternatif plus honnête si on préfère :
+"Votre retour sur {nomProspect} a été enregistré. Il sera utilisé pour affiner la qualification IA de votre concession."
+
+====================================================================
+PARTIE 7, PAGE D'AIDE
+====================================================================
+
+## 17. METTRE À JOUR LA PAGE D'AIDE
+
+Fichier : frontend/src/app/aide/page.tsx
+
+Dans la section FAQ (id: "faq"), ajouter :
+```
+Pourquoi me demande-t-on mon avis après chaque RDV ?
+Votre retour permet à l'IA de s'améliorer. En 2 clics, vous indiquez si la qualification était correcte et quelle suite donner. Plus vous donnez de retours, plus votre assistant devient précis pour qualifier vos prospects.
+```
+
+Ajouter aussi :
+```
+Que signifient les paliers 🌱🌿🌳⭐🏆 ?
+Ils indiquent le volume de retours que votre équipe a donnés à l'IA. Plus vous avez de retours, plus l'IA comprend les spécificités de votre concession. À partir de 20 retours, un score de précision apparaît pour mesurer la qualité de la qualification.
+```
+
+====================================================================
+PARTIE 8, CHATBOT NORA, PRISE EN CHARGE DU FEEDBACK
+====================================================================
+
+## 18. AJOUTER DES RÉPONSES SUR LE FEEDBACK DANS LE CHATBOT AIDE
+
+Fichier : backend/src/main/resources/prompts/aide-app.txt
+
+Dans le prompt d'aide de Nora, ajouter une section pour qu'elle sache répondre aux questions sur le feedback :
+
+Ajouter dans la section des fonctionnalités connues :
+```
+## FEEDBACK POST-RDV
+- Quand un vendeur clique sur "Effectué", un slide-up apparaît avec 2 questions rapides (2 taps) :
+  1. "L'IA avait bien qualifié ?" → 🔥 Parfait / 👍 Correct / 😕 À côté
+  2. "Suite prévue ?" → Devis envoyé / Essai prévu / Relancer / Perdu
+- Le feedback est optionnel : si le vendeur ferme sans répondre, le RDV est quand même clôturé
+- Le bouton "Abandonner" demande aussi la raison (No-show, Prospect a annulé, Doublon, Autre)
+- Système de paliers : 🌱 Premiers pas → 🌿 En croissance → 🌳 Fiable → ⭐ Expert → 🏆 Maître
+- À partir de 20 retours, un score de précision IA apparaît
+- Les retours servent à améliorer la qualification IA pour la concession
+```
+
+## 19. METTRE À JOUR LES SUGGESTIONS DU CHATBOT EN MODE AIDE
+
+Fichier : frontend/src/components/help/HelpBubble.tsx
+
+Dans les suggestions du mode aide (SUGGESTIONS_AIDE ou équivalent), ajouter :
+```tsx
+"À quoi servent les paliers IA ?"
+```
+(remplacer une des suggestions existantes les moins utiles, ou ajouter en 5ème si possible)
+
+====================================================================
+PARTIE 9, COHÉRENCE AVEC LES PROMPTS EXISTANTS
+====================================================================
+
+## 20. VÉRIFIER LA COHÉRENCE AVEC LES AUTRES PROMPTS
+
+Avant de compiler, vérifier que :
+- Les noms d'enums dans le backend correspondent EXACTEMENT aux valeurs envoyées par le frontend
+- Le champ `qualite_qualification` dans la DB correspond au getter `getQualiteAppel()` dans l'entité (mapping via @Column(name = "qualite_qualification"))
+- Le prompt aide-app.txt est bien rechargé par AideChatService au @PostConstruct
+- La page d'aide et le chatbot utilisent les mêmes termes pour parler du feedback (paliers, précision, etc.)
+- Le prompt de simulation (prompt-feature-simulation-prospect.txt) n'est PAS impacté par ces changements
+
+====================================================================
+FIN, VÉRIFICATIONS
+====================================================================
+
+Après toutes les modifications :
+1. Vérifier que le backend compile
+2. Vérifier que le frontend compile
+3. Vérifier que le FeedbackRdvSlideUp s'affiche correctement avec les 3 cas de confirmation (< 20, >= 20, passage de palier)
+4. Vérifier que les appels API fonctionnent
+5. Vérifier que les RDV non clôturés ont la friction visuelle (badge, tri, couleur)
+6. Vérifier que la section bonus briefing apparaît quand il y a des feedbacks
+7. Vérifier que la notification d'impact s'affiche pour les feedbacks 😕 de plus de 7 jours
+8. NE PAS COMMIT, attendre validation

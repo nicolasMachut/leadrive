@@ -1,0 +1,22 @@
+# ============================================================================
+# Template WhatsApp : premier_contact
+# Premier message envoye au prospect apres import du lead.
+# Categorie UTILITY (auto-approbation Meta en quelques minutes).
+# ============================================================================
+name: leadrive_premier_contact
+language: fr
+category: UTILITY
+components:
+  - type: BODY
+    text: >
+      Bonjour, je suis {{1}}, l'assistante virtuelle de {{2}}.
+      L'un de nos conseillers m'a chargée de vous contacter au sujet
+      de votre projet de {{3}}. À quel moment de la journée pourrait-il
+      vous appeler pour en discuter ?
+    variables:
+      - description: "Prenom de l'assistante virtuelle"
+        example: "Nora"
+      - description: "Nom de l'etablissement"
+        example: "Pinson Automobiles"
+      - description: "Vehicule / projet du prospect"
+        example: "Renault Clio V"

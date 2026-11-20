@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    clean-disabled: false
+
+# Cle de chiffrement de dev (32 bytes base64). Locale uniquement, jamais en prod.
+secret:
+  crypto:
+    master-key: ${TWILIO_ENCRYPTION_KEY:eXoX3C+yHeHKkNy90bjAclTiYC28GoBxerEFl/gwhdk=}
+
+logging:
+  level:
+    fr.leadrevive: DEBUG
+    org.hibernate.SQL: DEBUG

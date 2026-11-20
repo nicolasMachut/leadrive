@@ -1,0 +1,260 @@
+⚠️ NE PAS COMMIT. Je veux valider toutes les modifications avant de committer.
+
+Tu dois ajouter une nouvelle section "Exemples de conversations IA" dans la page d'aide de l'application.
+
+Fichier à modifier : frontend/src/app/aide/page.tsx
+
+## CE QUE TU DOIS FAIRE
+
+1. Ajouter une nouvelle section dans le tableau SECTIONS[], juste APRÈS la section "ia" (id: "ia", titre: "Comment marche l'IA") et AVANT la section "actions" (id: "actions", titre: "Dashboard").
+
+2. La nouvelle section doit avoir :
+   - id: "exemples-ia"
+   - titre: "Exemples de conversations IA"
+
+3. Le contenu doit afficher 4 conversations d'exemple dans un design type "chat WhatsApp" avec :
+   - Les messages IA alignés à gauche avec un fond léger (bg-accent/10 ou similaire)
+   - Les messages prospect alignés à droite avec un fond vert/emerald léger
+   - Un titre pour chaque conversation
+   - Un petit résumé de ce qui se passe dans chaque exemple
+   - Un système d'accordéon (cliquer pour déplier/replier) pour ne pas surcharger la page, les 4 conversations sont repliées par défaut
+
+4. Le state pour les accordéons doit être géré dans le composant AidePage (ajouter un useState<string | null> pour tracker quel exemple est ouvert).
+
+## LES 4 CONVERSATIONS
+
+Voici les 4 conversations à intégrer. Ce sont les cas les plus courants en concession. Utilise le vouvoiement partout. Pas de formulations négatives ("pas de souci", "n'hésitez pas", etc.).
+
+### EXEMPLE 1 : Lead frais, Parcours idéal
+Description courte : "Un prospect intéressé par un véhicule neuf. L'IA qualifie son projet et décroche un RDV."
+
+```
+🤖 Nora (IA)
+Bonjour Sophie, je suis Nora, l'assistante IA de Garage Central. J'ai bien noté votre intérêt pour la Peugeot 3008. À quel moment de la journée seriez-vous disponible pour en discuter de vive voix avec l'un de nos conseillers ?
+
+👤 Sophie
+Demain après-midi ça irait
+
+🤖 Nora (IA)
+Très bien, je vous propose un appel demain à 14h. Vous me confirmez que ce créneau vous convient ?
+
+👤 Sophie
+Oui c'est bon !
+
+🤖 Nora (IA)
+C'est confirmé ! Je note votre appel demain à 14h. Pour que notre conseiller prépare au mieux votre échange, pour quand est prévu votre projet d'achat ?
+
+👤 Sophie
+Ce mois-ci, ma voiture actuelle est en fin de leasing
+
+🤖 Nora (IA)
+Parfait, c'est le bon timing pour avancer ! Êtes-vous arrêtée sur la Peugeot 3008 ou peut-on vous aider à peaufiner votre réflexion ?
+
+👤 Sophie
+La 3008 me plaît bien, j'hésite juste entre la version Allure et GT
+
+🤖 Nora (IA)
+Excellent choix ! Avez-vous un véhicule à faire reprendre ?
+
+👤 Sophie
+Oui j'ai une Renault Clio 4 de 2020
+
+🤖 Nora (IA)
+C'est noté ! La reprise de votre Clio conditionne-t-elle votre achat ?
+
+👤 Sophie
+Oui, ça dépend de la somme
+
+🤖 Nora (IA)
+C'est noté. Avez-vous déjà une idée du budget que vous souhaitez allouer ?
+
+👤 Sophie
+Autour de 30 000 euros
+
+🤖 Nora (IA)
+C'est noté ! Êtes-vous déjà allée voir votre banque pour le financement, ou pas encore ?
+
+👤 Sophie
+Pas encore, je pensais regarder en LOA
+
+🤖 Nora (IA)
+C'est noté ! Notre conseiller Marc vous appellera demain à 14h. Il aura préparé une estimation de votre Clio et les meilleures conditions pour la Peugeot 3008 adaptées à votre budget, vous n'aurez plus qu'à comparer et décider. À très bientôt !
+
+👤 Sophie
+Super, merci beaucoup ! À demain
+```
+
+### EXEMPLE 2 : Prospect hésitant, L'IA rassure sans forcer
+Description courte : "Un prospect pas encore décidé. L'IA s'adapte, ne force pas, et sécurise un créneau en douceur."
+
+```
+🤖 Nora (IA)
+Bonjour Karim, je suis Nora, l'assistante IA de Garage Central. J'ai bien noté votre intérêt pour le Renault Captur. À quel moment de la journée seriez-vous disponible pour en discuter avec l'un de nos conseillers ?
+
+👤 Karim
+Je sais pas trop, c'est pas urgent en fait
+
+🤖 Nora (IA)
+Je comprends, c'est un projet important. Notre conseiller est là pour répondre à toutes vos questions, sans engagement. Je vous renvoie un petit message demain pour qu'on cale ça ensemble, ça vous convient ?
+
+👤 Karim
+Ok oui, demain ça va
+
+🤖 Nora (IA)
+Très bien ! En attendant, juste pour que notre conseiller prépare au mieux, pour quand est prévu votre projet ?
+
+👤 Karim
+Dans 2-3 mois peut-être, je regarde juste pour l'instant
+
+🤖 Nora (IA)
+C'est le bon moment pour commencer à regarder, comme ça vous aurez le temps de comparer tranquillement. Êtes-vous arrêté sur le Captur ou vous hésitez avec d'autres modèles ?
+
+👤 Karim
+J'hésite un peu avec le Peugeot 2008 aussi
+
+🤖 Nora (IA)
+C'est une bonne démarche de comparer. Justement, notre conseiller connaît très bien les deux modèles et pourra vous orienter. On se recontacte demain pour caler un créneau ?
+
+👤 Karim
+Oui d'accord, à demain
+```
+
+### EXEMPLE 3 : Lead abandonné, Reprise de contact
+Description courte : "Un prospect qu'on n'a pas réussi à joindre. L'IA reprend le fil naturellement."
+
+```
+🤖 Nora (IA)
+Bonjour Thomas, je suis Nora, l'assistante IA de Garage Central. Notre équipe a essayé de vous joindre concernant votre intérêt pour la Dacia Sandero sans pouvoir vous atteindre. À quel moment de la journée seriez-vous disponible pour échanger de vive voix avec l'un de nos conseillers ?
+
+👤 Thomas
+Ah oui pardon j'étais en vacances ! Jeudi 10h ça marche ?
+
+🤖 Nora (IA)
+Très bien, je vous propose un appel jeudi à 10h. Vous me confirmez ?
+
+👤 Thomas
+Oui c'est bon pour moi
+
+🤖 Nora (IA)
+C'est confirmé ! Je note votre appel jeudi à 10h. Pour quand est prévu votre projet d'achat ?
+
+👤 Thomas
+Rapidement, j'ai besoin d'une voiture pour le travail
+
+🤖 Nora (IA)
+Parfait, c'est le bon timing pour avancer ! Avez-vous un véhicule à faire reprendre ?
+
+👤 Thomas
+Non, c'est ma première voiture
+
+🤖 Nora (IA)
+C'est noté. Avez-vous une idée du budget ?
+
+👤 Thomas
+Pas plus de 15 000 euros, je suis en début de carrière
+
+🤖 Nora (IA)
+C'est noté ! Êtes-vous déjà allé voir votre banque ?
+
+👤 Thomas
+Non pas encore
+
+🤖 Nora (IA)
+C'est noté. Notre conseiller Marc vous rappellera jeudi à 10h. Il aura préparé les meilleures conditions pour la Dacia Sandero dans votre budget. À jeudi !
+
+👤 Thomas
+Merci, à jeudi !
+```
+
+### EXEMPLE 4 : Prospect qui préfère les messages, Pivot de canal
+Description courte : "Un prospect qui ne veut pas d'appel. L'IA bascule sur la conversation par message et obtient un RDV en concession."
+
+```
+🤖 Nora (IA)
+Bonjour Claire, je suis Nora, l'assistante IA de Garage Central. J'ai bien noté votre intérêt pour la Citroën C5 Aircross. À quel moment de la journée seriez-vous disponible pour en discuter avec l'un de nos conseillers ?
+
+👤 Claire
+Je ne souhaite pas être appelée, je préfère par message
+
+🤖 Nora (IA)
+Je comprends ! Souhaitez-vous que nous discutions par message pour voir comment je peux vous aider dans votre projet ?
+
+👤 Claire
+Oui par message c'est mieux pour moi
+
+🤖 Nora (IA)
+Parfait ! Pour quand est prévu votre projet d'achat ?
+
+👤 Claire
+Dans un mois environ, mon leasing se termine
+
+🤖 Nora (IA)
+C'est le bon moment pour anticiper. Êtes-vous arrêtée sur le C5 Aircross ?
+
+👤 Claire
+Oui, c'est le modèle qui me plaît. Par contre j'aimerais le voir en vrai avant de décider
+
+🤖 Nora (IA)
+C'est noté ! Avez-vous un véhicule à faire reprendre ?
+
+👤 Claire
+Oui, mon Peugeot 3008 en fin de leasing
+
+🤖 Nora (IA)
+C'est noté. Avez-vous une idée du budget pour la suite ?
+
+👤 Claire
+Entre 30 et 35 000 euros
+
+🤖 Nora (IA)
+C'est noté ! Notre conseiller pourrait vous présenter les meilleures options et conditions dans votre budget. Samedi matin pour un appel, ça vous irait ?
+
+👤 Claire
+Samedi matin c'est bien, vers 10h ?
+
+🤖 Nora (IA)
+Je vous propose un appel samedi à 10h. Vous me confirmez ?
+
+👤 Claire
+Oui c'est confirmé !
+
+🤖 Nora (IA)
+C'est confirmé ! Notre conseiller Marc vous appellera samedi à 10h. Il aura préparé les meilleures conditions pour le C5 Aircross dans votre budget. À samedi !
+```
+
+## DESIGN DES CONVERSATIONS
+
+Chaque conversation doit être dans un composant accordéon. Le design de chaque message doit ressembler à une bulle WhatsApp :
+
+- **Messages IA** : alignés à gauche, fond `bg-[var(--muted)]/50` ou `bg-accent/5`, bordure arrondie côté gauche
+- **Messages prospect** : alignés à droite, fond `bg-emerald-500/10` (ou `bg-green-500/10`), bordure arrondie côté droit
+- **Préfixe** : petit label "Nora (IA)" en accent pour l'IA, "Prospect" en emerald/vert pour le prospect
+- Typographie petite (text-sm), espacement serré pour faire compact
+
+L'intro de la section doit dire :
+"Voici comment l'IA Leadrive interagit avec vos prospects sur WhatsApp. Ces exemples illustrent les cas les plus courants. L'IA s'adapte automatiquement au profil et aux réponses du prospect."
+
+Et un petit disclaimer en bas :
+"Les conversations réelles varient selon la configuration de votre assistant (marques, horaires, ton) et les réponses du prospect."
+
+## DÉTAILS TECHNIQUES
+
+- Le composant doit utiliser les CSS variables existantes du projet (--foreground, --border, --card, --muted, --color-lr-text-secondary, etc.)
+- Le state accordéon : `const [exempleOuvert, setExempleOuvert] = useState<string | null>(null)` dans AidePage
+- Cliquer sur un exemple l'ouvre (et ferme l'autre s'il y en a un ouvert)
+- Animation de transition (max-height ou conditional render avec transition)
+- Chaque accordéon a un petit chevron (▸ fermé, ▾ ouvert) à côté du titre
+- Responsive : les bulles doivent être lisibles sur mobile
+
+## MISE À JOUR DU SOMMAIRE
+
+Ajouter dans la sidebar de navigation (le tableau SECTIONS est automatiquement mappé) :
+- Le titre "Exemples de conversations IA" doit apparaître dans le sommaire sticky à gauche, entre "Comment marche l'IA" et "Dashboard"
+
+## VÉRIFICATION
+
+Après les modifications :
+- La page doit compiler sans erreur
+- Les 4 conversations doivent être visibles et cliquables
+- Le scroll-spy doit fonctionner avec la nouvelle section
+- Le design doit être cohérent avec le reste de la page d'aide

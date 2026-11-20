@@ -1,0 +1,312 @@
+⚠️ NE PAS COMMIT. Je veux valider toutes les modifications avant de committer.
+⚠️ Tu dois TOUT faire. Chaque point est OBLIGATOIRE.
+
+Tu dois ajouter un mode "Simulation de prospect" au chatbot d'aide Nora. L'utilisateur pourra basculer entre le mode Aide (actuel) et un mode Simulation où il écrit comme un prospect et Nora répond exactement comme l'IA le ferait sur WhatsApp, en utilisant le prompt de conversation réel.
+
+====================================================================
+PARTIE 1, MODIFICATIONS BACKEND
+====================================================================
+
+## 1. AJOUTER LE CHAMP MODE AU DTO
+
+Fichier : backend/src/main/java/fr/leadrevive/ai/dto/ReqAideChatDto.java
+
+Ajouter un champ :
+```java
+/** "aide" (defaut) ou "simulation" */
+private String mode;
+```
+
+Pas de validation @NotBlank, le champ est optionnel. Si null ou vide, c'est le mode "aide" par défaut.
+
+## 2. CHARGER LE PROMPT DE CONVERSATION DANS LE SERVICE
+
+Fichier : backend/src/main/java/fr/leadrevive/ai/service/AideChatService.java
+
+Modifications à faire :
+
+A) Ajouter une seconde variable pour le prompt de simulation :
+```java
+private String systemPromptTemplate;          // existant, prompt aide-app.txt
+private String simulationPromptTemplate;      // nouveau, prompt basé sur whatsapp-conversation.txt
+```
+
+B) Dans la méthode @PostConstruct chargerPrompt(), charger aussi le prompt de conversation :
+```java
+@PostConstruct
+void chargerPrompt() {
+    try {
+        systemPromptTemplate = new ClassPathResource("prompts/aide-app.txt")
+                .getContentAsString(StandardCharsets.UTF_8);
+        log.info("Prompt aide-app charge - taille: {} caracteres", systemPromptTemplate.length());
+    } catch (final IOException e) {
+        throw new IllegalStateException("Impossible de charger prompts/aide-app.txt", e);
+    }
+
+    try {
+        String conversationPrompt = new ClassPathResource("prompts/whatsapp-conversation.txt")
+                .getContentAsString(StandardCharsets.UTF_8);
+
+        // Construire le prompt de simulation avec des instructions wrapper
+        simulationPromptTemplate = """
+            Tu es en MODE SIMULATION. L'utilisateur est un manager ou vendeur de concession automobile qui veut tester comment l'IA WhatsApp Leadrive répondrait à un prospect.
+
+            L'utilisateur va écrire des messages COMME SI il était un prospect. Tu dois répondre EXACTEMENT comme l'IA WhatsApp le ferait en production, en suivant le prompt de conversation ci-dessous.
+
+            RÈGLES DU MODE SIMULATION :
+            1. Réponds UNIQUEMENT comme l'IA WhatsApp, pas de méta-commentaire, pas d'explication
+            2. Utilise le vouvoiement strict
+            3. Respecte TOUTES les règles du prompt (formulations positives, pas de prix, confirmation RDV, etc.)
+            4. Utilise ces valeurs par défaut pour les variables du template :
+               - {PRENOM_ASSISTANT} = Nora
+               - {NOM_CONCESSION} = le nom de la concession de l'utilisateur (ou "votre concession" si inconnu)
+               - {NOM_CONCESSION_2} = idem
+               - {MARQUES} = les marques configurées par la concession (ou "nos marques" si inconnu)
+               - {HORAIRES} = Lundi-Vendredi 9h-19h, Samedi 9h-12h
+               - {NOM_PROSPECT} = le prénom donné par l'utilisateur dans la conversation, ou "Prospect"
+               - {MARQUE_VEHICULE} / {MODELE_VEHICULE} = ce que l'utilisateur mentionne
+               - Les autres variables : "Non renseigné"
+            5. Si l'utilisateur pose une question sur l'outil Leadrive (hors simulation), réponds : "Je suis en mode simulation, pour les questions sur l'outil, basculez en mode Aide avec le bouton en haut du chat."
+
+            --- PROMPT DE CONVERSATION WHATSAPP (à suivre strictement) ---
+
+            """ + conversationPrompt;
+
+        log.info("Prompt simulation charge - taille: {} caracteres", simulationPromptTemplate.length());
+    } catch (final IOException e) {
+        log.warn("Impossible de charger le prompt de simulation : {}", e.getMessage());
+        simulationPromptTemplate = null; // Le mode simulation sera indisponible
+    }
+}
+```
+
+C) Dans la méthode repondre(), choisir le bon prompt selon le mode :
+```java
+public String repondre(final ReqAideChatDto request, final Long tenantId, final String role) {
+    final long debut = System.currentTimeMillis();
+
+    // Choisir le prompt selon le mode
+    final boolean isSimulation = "simulation".equalsIgnoreCase(request.getMode());
+    final String basePrompt = isSimulation && simulationPromptTemplate != null
+            ? simulationPromptTemplate
+            : systemPromptTemplate;
+
+    // System prompt enrichi avec le role et la route courante
+    final StringBuilder systemPrompt = new StringBuilder(basePrompt);
+    systemPrompt.append("\n\n## CONTEXTE DE LA SESSION COURANTE\n");
+    systemPrompt.append("- Role de l'utilisateur : ").append(role != null ? role : "INCONNU").append("\n");
+    if (request.getRouteCourante() != null && !request.getRouteCourante().isBlank()) {
+        systemPrompt.append("- Page actuellement consultee : ").append(request.getRouteCourante()).append("\n");
+    }
+
+    // ... le reste de la méthode ne change PAS
+```
+
+D) Dans le log AiLog, changer le TypeGenerationEnum selon le mode :
+- Mode aide : `TypeGenerationEnum.AIDE_CHAT` (existant)
+- Mode simulation : `TypeGenerationEnum.AIDE_SIMULATION` (nouveau)
+
+## 3. AJOUTER LE TYPE DE GÉNÉRATION
+
+Fichier : backend/src/main/java/fr/leadrevive/ai/entity/TypeGenerationEnum.java
+
+Ajouter la valeur : `AIDE_SIMULATION`
+
+====================================================================
+PARTIE 2, MODIFICATIONS FRONTEND, CHATBOT HELPBUBBLE
+====================================================================
+
+## 4. AJOUTER LE TOGGLE DE MODE DANS LE HEADER DU CHATBOT
+
+Fichier : frontend/src/components/help/HelpBubble.tsx
+
+A) Ajouter un state pour le mode :
+```tsx
+const [mode, setMode] = useState<"aide" | "simulation">("aide");
+```
+
+B) Ajouter la persistance localStorage pour le mode (même pattern que les messages) :
+```tsx
+const STORAGE_KEY_MODE = "leadrive_help_mode";
+```
+Charger et sauvegarder le mode comme les messages et l'état open.
+
+C) Modifier le header du chatbot pour ajouter un toggle entre les deux modes. Le header actuel affiche "Nora, Aide" avec un bouton Reset. Remplacer par :
+
+```tsx
+{/* Header */}
+<div className="flex flex-col border-b border-[var(--border)]">
+  {/* Ligne titre */}
+  <div className="flex items-center justify-between px-4 py-3">
+    <div className="flex items-center gap-2">
+      <div className={`flex h-8 w-8 items-center justify-center rounded-full ${
+        mode === "aide" ? "bg-accent/15" : "bg-emerald-500/15"
+      }`}>
+        {mode === "aide" ? (
+          <svg className="h-4 w-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+          </svg>
+        ) : (
+          <svg className="h-4 w-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+        )}
+      </div>
+      <div>
+        <p className="text-sm font-semibold text-[var(--foreground)]">
+          Nora, {mode === "aide" ? "Aide" : "Simulation"}
+        </p>
+        <p className="text-[10px] text-[var(--color-lr-text-secondary)]">
+          {mode === "aide" ? "Réponses instantanées par IA" : "Testez les réponses de l'IA WhatsApp"}
+        </p>
+      </div>
+    </div>
+    <button
+      onClick={reinitialiser}
+      className="text-[10px] font-medium text-[var(--color-lr-text-secondary)] hover:text-[var(--foreground)]"
+      title="Réinitialiser la conversation"
+    >
+      Reset
+    </button>
+  </div>
+
+  {/* Toggle mode */}
+  <div className="flex px-4 pb-2 gap-1">
+    <button
+      onClick={() => { setMode("aide"); reinitialiser(); }}
+      className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+        mode === "aide"
+          ? "bg-accent/15 text-accent"
+          : "text-[var(--color-lr-text-secondary)] hover:bg-[var(--muted)]"
+      }`}
+    >
+      💡 Aide
+    </button>
+    <button
+      onClick={() => { setMode("simulation"); reinitialiser(); }}
+      className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+        mode === "simulation"
+          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+          : "text-[var(--color-lr-text-secondary)] hover:bg-[var(--muted)]"
+      }`}
+    >
+      💬 Simuler un prospect
+    </button>
+  </div>
+</div>
+```
+
+D) Changer le message de bienvenue selon le mode. Définir deux constantes :
+```tsx
+const MESSAGE_BIENVENUE_AIDE: ChatMessage = {
+  role: "assistant",
+  contenu: "Bonjour ! Je suis Nora, l'assistant IA de Leadrive. Posez-moi vos questions sur le fonctionnement de l'outil.",
+};
+
+const MESSAGE_BIENVENUE_SIMULATION: ChatMessage = {
+  role: "assistant",
+  contenu: "Mode simulation activé ! Écrivez comme un prospect (ex: \"Bonjour, je suis intéressé par la Peugeot 3008\") et je répondrai exactement comme l'IA le ferait sur WhatsApp.\n\nVous pouvez tester tous les cas : hésitation, refus, demande de prix, demande d'essai, prospect mécontent...",
+};
+```
+
+Utiliser le bon message selon le mode courant. Quand le mode change (via le toggle), appeler reinitialiser() qui doit utiliser le bon message de bienvenue.
+
+E) Changer les suggestions selon le mode :
+```tsx
+const SUGGESTIONS_AIDE = [
+  "Comment importer mes leads ?",
+  "C'est quoi le scoring ?",
+  "À quoi sert l'analyse IA ?",
+  "Comment confirmer une vente ?",
+];
+
+const SUGGESTIONS_SIMULATION = [
+  "Bonjour, je suis intéressé par la Peugeot 3008",
+  "C'est combien ? Envoyez-moi juste le prix",
+  "Je ne veux pas être appelé, je préfère par message",
+  "Encore vous ? Arrêtez de me contacter !",
+];
+```
+
+F) Envoyer le mode dans la requête API. Modifier l'appel fetch dans la fonction envoyer() :
+```tsx
+body: JSON.stringify({
+  question: question.trim(),
+  routeCourante: pathname,
+  historique,
+  mode,  // <-- AJOUTER CE CHAMP
+}),
+```
+
+G) Changer le placeholder de l'input selon le mode :
+```tsx
+placeholder={mode === "aide" ? "Posez votre question..." : "Écrivez comme un prospect..."}
+```
+
+H) En mode simulation, donner un style légèrement différent au panneau :
+- Ajouter une fine bordure verte/emerald en haut du panneau quand mode === "simulation"
+- Ou changer le fond très légèrement : `bg-emerald-500/[0.02]` en mode simulation
+
+I) La fonction reinitialiser() doit utiliser le bon message de bienvenue :
+```tsx
+function reinitialiser() {
+  setMessages([mode === "aide" ? MESSAGE_BIENVENUE_AIDE : MESSAGE_BIENVENUE_SIMULATION]);
+  setInput("");
+}
+```
+
+ATTENTION : quand on switch de mode via le toggle, on appelle reinitialiser() APRÈS avoir changé le mode. Il faut s'assurer que le state du mode est bien à jour. Le plus simple : passer le nouveau mode en paramètre :
+```tsx
+function reinitialiser(nouveauMode?: "aide" | "simulation") {
+  const m = nouveauMode ?? mode;
+  setMessages([m === "aide" ? MESSAGE_BIENVENUE_AIDE : MESSAGE_BIENVENUE_SIMULATION]);
+  setInput("");
+}
+
+// Dans les boutons toggle :
+onClick={() => { setMode("simulation"); reinitialiser("simulation"); }}
+```
+
+====================================================================
+PARTIE 3, MODIFICATIONS FRONTEND, PAGE D'AIDE
+====================================================================
+
+## 5. AJOUTER UNE MENTION DANS LA SECTION "COMMENT MARCHE L'IA"
+
+Fichier : frontend/src/app/aide/page.tsx
+
+Dans la section "ia" (id: "ia", titre: "Comment marche l'IA"), APRÈS le bloc "6. Rappels RDV automatiques", ajouter un nouveau bloc :
+
+```tsx
+<div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 mt-2">
+  <p className="font-semibold mb-1">7. Mode simulation</p>
+  <p className="text-sm text-[var(--color-lr-text-secondary)]">
+    Envie de voir comment l&apos;IA répondrait à un prospect ? Cliquez sur le bouton <strong>?</strong> en bas à droite, puis activez le mode <strong>Simuler un prospect</strong>. Écrivez comme si vous étiez un prospect et Nora répondra exactement comme elle le ferait sur WhatsApp. Idéal pour se familiariser avec l&apos;IA avant de lancer vos premières conversations.
+  </p>
+</div>
+```
+
+## 6. AJOUTER UNE FAQ SUR LE MODE SIMULATION
+
+Dans la section "faq" (id: "faq"), ajouter une nouvelle question AVANT la dernière ("Une question pas listée ici ?") :
+
+```tsx
+<div>
+  <p className="font-semibold mb-1">Comment tester les réponses de l&apos;IA avant de contacter mes prospects ?</p>
+  <p className="text-sm text-[var(--color-lr-text-secondary)]">
+    Ouvrez le chatbot Nora (bouton <strong>?</strong> en bas à droite) et cliquez sur <strong>Simuler un prospect</strong>. Vous pouvez écrire n&apos;importe quel message comme si vous étiez un prospect : &quot;Bonjour, c&apos;est combien la 3008 ?&quot;, &quot;Je ne veux pas être appelé&quot;, &quot;C&apos;est trop cher&quot;... Nora répondra avec les mêmes règles que sur WhatsApp. Testez les cas difficiles pour voir comment l&apos;IA s&apos;en sort !
+  </p>
+</div>
+```
+
+====================================================================
+FIN, VÉRIFICATIONS
+====================================================================
+
+Après toutes les modifications :
+1. Vérifier que le backend compile sans erreur
+2. Vérifier que le frontend compile sans erreur
+3. Vérifier que le chatbot HelpBubble affiche bien les deux modes
+4. Vérifier que le toggle switch bien les messages de bienvenue et suggestions
+5. Vérifier que la page d'aide affiche les nouvelles sections
+6. NE PAS COMMIT, attendre validation

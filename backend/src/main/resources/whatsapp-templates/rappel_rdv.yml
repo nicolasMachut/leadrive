@@ -1,0 +1,21 @@
+# ============================================================================
+# Template WhatsApp : rappel_rdv (rappel le jour J, ~1h avant le RDV)
+# Categorie UTILITY (validation Meta rapide + tarif reduit).
+# Variables alignees sur le code (RappelRdvService.envoyerTemplate) :
+#   {{1}} = prenom assistante, {{2}} = etablissement
+# ============================================================================
+name: leadrive_rappel_rdv
+language: fr
+category: UTILITY
+components:
+  - type: BODY
+    text: >
+      Bonjour, c'est {{1}} de {{2}}.
+      Notre conseiller vous appelle dans environ 1 heure comme convenu.
+      Si un imprévu s'est glissé dans votre journée, répondez-moi et on
+      décale facilement.
+    variables:
+      - description: "Prenom de l'assistante virtuelle"
+        example: "Nora"
+      - description: "Nom de l'etablissement"
+        example: "Pinson Automobiles"

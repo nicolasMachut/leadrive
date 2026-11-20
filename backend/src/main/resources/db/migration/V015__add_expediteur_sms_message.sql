@@ -1,0 +1,1 @@
+ALTER TABLE sms_message ADD COLUMN expediteur VARCHAR(10) DEFAULT 'IA';

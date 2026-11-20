@@ -1,0 +1,24 @@
+# ============================================================================
+# Template WhatsApp : relance J+3 (derniere relance si toujours pas de reponse)
+# Cadence reelle J+3 (cf. RelanceWhatsAppService, delaiJ3Heures).
+# Categorie UTILITY (auto-approbation Meta en quelques minutes).
+# Variables alignees sur le code (construireVariables) :
+#   {{1}} = prenom assistante, {{2}} = etablissement, {{3}} = vehicule / projet
+# ============================================================================
+name: leadrive_relance_j3
+language: fr
+category: UTILITY
+components:
+  - type: BODY
+    text: >
+      Bonjour, c'est {{1}} de {{2}}.
+      Je reviens une dernière fois au sujet de votre projet de {{3}}.
+      Notre conseiller peut vous rappeler en 5 minutes pour répondre
+      à vos questions. Souhaitez-vous qu'on organise ça ?
+    variables:
+      - description: "Prenom de l'assistante virtuelle"
+        example: "Nora"
+      - description: "Nom de l'etablissement"
+        example: "Pinson Automobiles"
+      - description: "Vehicule / projet du prospect"
+        example: "Volkswagen Golf 8"

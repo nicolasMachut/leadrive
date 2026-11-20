@@ -1,0 +1,297 @@
+spring:
+  application:
+    name: leadrevive
+  jackson:
+    time-zone: Europe/Paris
+  # Timeouts HTTP par defaut des RestClient (dont le client Spring AI / Anthropic).
+  # Borne le pire cas : un appel IA qui hang ne bloque plus indefiniment le thread
+  # Tomcat (sinon saturation du pool + retry Twilio en boucle). 60s = large pour une
+  # generation Haiku (maxTokens 2000), bien au-dela des appels Clerk/autres.
+  http:
+    client:
+      connect-timeout: 20s
+      read-timeout: 60s
+
+  datasource:
+    hikari:
+      # Pool dimensionne pour Railway 1 instance + ~50 utilisateurs concurrents.
+      # Si scaling horizontal, repenser globalement (chaque instance prend son propre pool).
+      maximum-pool-size: 25
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+      data-source-properties:
+        # SSL Postgres : "require" en prod (Railway), "prefer" en local (Docker sans SSL).
+        # Override via env var DB_SSL_MODE=require en deploiement.
+        sslmode: ${DB_SSL_MODE:prefer}
+
+  servlet:
+    multipart:
+      # Limite la taille des fichiers uploades (CSV import). Defense en profondeur contre les memory bombs.
+      max-file-size: 5MB
+      max-request-size: 5MB
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate:
+        physical_naming_strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=500,expireAfterWrite=600s
+
+  ai:
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      chat:
+        options:
+          model: claude-haiku-4-5
+          max-tokens: 1024
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+server:
+  port: 8080
+  # Necessaire derriere Railway/ngrok/tout reverse-proxy : sans ca, request.getScheme()
+  # renvoie "http" (le proxy parle au backend en clair) au lieu de "https",
+  # et la signature Twilio devient invalide.
+  forward-headers-strategy: native
+
+resilience4j:
+  retry:
+    instances:
+      # Bucket pour les appels Anthropic (chat IA)
+      aiCall:
+        max-attempts: 3
+        wait-duration: 1s
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - org.springframework.web.client.HttpServerErrorException
+          - org.springframework.web.client.ResourceAccessException
+          - java.net.SocketTimeoutException
+          - java.io.IOException
+        ignore-exceptions:
+          - java.lang.IllegalArgumentException
+          - java.lang.IllegalStateException
+      # Bucket separe pour les appels Twilio (envoi WhatsApp).
+      # ignore-exceptions : on ne retry PAS les erreurs metier (config absente,
+      # message bloque par moderation, erreur d'onboarding). Sans cela, le
+      # @Retry rejouerait 3x un code OTP invalide ou un message modere -
+      # gaspillage d'appels API et risque d'etre marque comme spam par Meta.
+      twilioCall:
+        max-attempts: 3
+        wait-duration: 1s
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        ignore-exceptions:
+          - java.lang.IllegalArgumentException
+          - java.lang.IllegalStateException
+          - fr.leadrevive.outreach.exception.WhatsAppNonConfigureException
+          - fr.leadrevive.outreach.exception.WhatsAppOnboardingException
+          - fr.leadrevive.outreach.exception.ModerationBlockedException
+      # Bucket pour les appels Clerk (auth/admin)
+      clerkCall:
+        max-attempts: 3
+        wait-duration: 500ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        # Quota de membres atteint = condition permanente : inutile de retry.
+        ignore-exceptions:
+          - fr.leadrevive.common.security.OrganizationMembershipQuotaExceededException
+  circuitbreaker:
+    instances:
+      aiCall:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+      twilioCall:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+      clerkCall:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        # Refus metier legitime (quota membres) : ne doit pas compter comme un echec
+        # Clerk, sinon le disjoncteur pourrait s'ouvrir et bloquer login + admin.
+        ignore-exceptions:
+          - fr.leadrevive.common.security.OrganizationMembershipQuotaExceededException
+  timelimiter:
+    instances:
+      aiCall:
+        timeout-duration: 30s
+      twilioCall:
+        timeout-duration: 15s
+      clerkCall:
+        timeout-duration: 10s
+
+clerk:
+  jwks-uri: ${CLERK_JWKS_URI:https://placeholder.clerk.accounts.dev/.well-known/jwks.json}
+  issuer: ${CLERK_ISSUER:https://placeholder.clerk.accounts.dev}
+  secret-key: ${CLERK_SECRET_KEY:}
+
+sentry:
+  # Si SENTRY_DSN est vide, le SDK Sentry est inactif (aucun event envoye)
+  dsn: ${SENTRY_DSN:}
+  environment: ${SENTRY_ENVIRONMENT:${SPRING_PROFILES_ACTIVE:default}}
+  release: ${SENTRY_RELEASE:}
+  # Echantillonnage des traces de perf — 10% par defaut, ajustable
+  traces-sample-rate: ${SENTRY_TRACES_SAMPLE_RATE:0.1}
+  # On masque les PII : Sentry n'enverra pas IP / cookies / headers d'auth
+  send-default-pii: false
+  # Bruit non actionnable a filtrer (clients SSE deconnectes, broken pipes...)
+  ignored-exceptions-for-type:
+    - org.springframework.web.context.request.async.AsyncRequestNotUsableException
+    - org.springframework.web.context.request.async.AsyncRequestTimeoutException
+    - org.apache.catalina.connector.ClientAbortException
+  # WARN+ deviennent breadcrumbs, ERROR+ deviennent events
+  logging:
+    minimum-event-level: error
+    minimum-breadcrumb-level: warn
+
+# Cle de chiffrement AES-256-GCM des secrets persistes (Twilio sub auth tokens, epic 25).
+# Generer : openssl rand -base64 32
+# OBLIGATOIRE en prod (Railway). Fail-fast au boot si absente.
+secret:
+  crypto:
+    master-key: ${TWILIO_ENCRYPTION_KEY:}
+
+# Epic 25 : templates WhatsApp YAML + Facebook Embedded Signup
+whatsapp:
+  templates:
+    # Si true : refuse de demarrer si aucun template n'est trouve dans le classpath.
+    # A passer false uniquement pour des tests qui ne touchent pas l'envoi WhatsApp.
+    required: ${WHATSAPP_TEMPLATES_REQUIRED:true}
+  # Ids Facebook utilises par le frontend (re-injectes via env Next.js
+  # NEXT_PUBLIC_FACEBOOK_APP_ID / NEXT_PUBLIC_FACEBOOK_CONFIG_ID). Documentation
+  # ici uniquement pour rappel ; le backend n'en a pas besoin directement,
+  # mais la production doit les definir cote frontend.
+
+leadrevive:
+  frontend-url: ${FRONTEND_URL:http://localhost:3000}
+  backend-url: ${BACKEND_URL:}
+  # Credentials Meta (cote backend) pour recuperer le verified_name du numero
+  # apres l'Embedded Signup : echange du code OAuth -> token -> Graph API.
+  # Le secret ne doit JAMAIS etre expose cote frontend.
+  facebook:
+    app-id: ${FACEBOOK_APP_ID:}
+    app-secret: ${FACEBOOK_APP_SECRET:}
+    graph-version: ${FACEBOOK_GRAPH_VERSION:v21.0}
+  max-messages-par-conversation: ${MAX_MESSAGES_PAR_CONVERSATION:40}
+  # Strategie multi-modeles IA : modele + max-tokens par TypeGenerationEnum.
+  # Le bloc spring.ai.anthropic (plus haut) reste le default global Spring AI ;
+  # ce mapping le surcharge par type de generation via AiModelResolver.
+  ai:
+    models:
+      default-model: ${AI_DEFAULT_MODEL:claude-haiku-4-5}
+      default-max-tokens: ${AI_DEFAULT_MAX_TOKENS:1024}
+      mapping:
+        WHATSAPP_CONVERSATION:
+          model: claude-sonnet-4-6
+          max-tokens: 1024
+        BRIEFING_QUOTIDIEN:
+          model: claude-sonnet-4-6
+          max-tokens: 4096
+        FICHE_PREPARATION:
+          model: claude-sonnet-4-6
+          max-tokens: 2048
+        AIDE_CHAT:
+          model: claude-sonnet-4-6
+          max-tokens: 1024
+        AIDE_SIMULATION:
+          model: claude-sonnet-4-6
+          max-tokens: 2048
+        WHATSAPP_EXTRACTION:
+          # Sonnet (et non Haiku) : l'extraction est la tache de RAISONNEMENT la plus
+          # dure du pipeline (resolution de date relative, re-planning d'un RDV deja
+          # acte, ignorer un "demain" perime). Haiku se trompait sur ces cas. Cout ~3x
+          # mais appel petit + asynchrone. Aligne sur WHATSAPP_CONVERSATION.
+          model: claude-sonnet-4-6
+          max-tokens: 1024
+        # max-tokens >= valeurs existantes du code (4000/2000/2000) : ne pas reduire,
+        # les sorties JSON de parsing seraient tronquees.
+        MAPPING_CSV:
+          model: claude-haiku-4-5
+          max-tokens: 4096
+        PARSING_EMAIL:
+          model: claude-haiku-4-5
+          max-tokens: 2048
+        PARSING_TEXTE_LIBRE:
+          model: claude-haiku-4-5
+          max-tokens: 2048
+      # Tarifs par modele (USD / token). Co-localises avec le mapping : quand on
+      # change ou ajoute un modele ci-dessus, ajouter/ajuster son tarif ici.
+      # Cle = id du modele (notation [..] = binding litteral, dashes preserves).
+      tarifs:
+        "[claude-haiku-4-5]":
+          prix-input: "0.000001"
+          prix-output: "0.000005"
+        "[claude-sonnet-4-6]":
+          prix-input: "0.000003"
+          prix-output: "0.000015"
+  relance:
+    enabled: ${RELANCE_ENABLED:false}
+    delai-j1-heures: ${RELANCE_DELAI_J1:24}
+    delai-j3-heures: ${RELANCE_DELAI_J3:72}
+    max-relances: ${RELANCE_MAX:2}
+    # Ticks d'envoi en heures de bureau : 9h30 + 14h30 et 12h00 + 17h00 (Europe/Paris), sauf
+    # dimanche. Deux crons car les minutes different selon l'heure. Verifier plusieurs fois par
+    # jour evite qu'un 1er message envoye juste apres 9h30 attende ~48h avant la relance J+1.
+    cron-matin-aprem: ${RELANCE_CRON_AM:0 30 9,14 * * *}
+    cron-midi-soir: ${RELANCE_CRON_PM:0 0 12,17 * * *}
+  rappel-rdv:
+    enabled: ${RAPPEL_RDV_ENABLED:false}
+  whatsapp:
+    # Codes d'erreur Twilio (CSV) a interpreter comme une RESTRICTION du compte
+    # WhatsApp Business : un ECHEC d'envoi portant l'un de ces codes bascule la config
+    # ACTIF -> RESTREINT (envoi bloque + banniere). Vide par defaut : a renseigner une
+    # fois les vrais codes observes en prod (chaque ECHEC logge deja "[code] message"
+    # dans WebhookController). NE JAMAIS y mettre 63016 (hors fenetre 24h, pas une
+    # restriction). Le signal de fond reste le polling sender (REJECTED -> RESTREINT).
+    codes-restriction: ${WHATSAPP_CODES_RESTRICTION:}
+  twilio:
+    account-sid: ${TWILIO_ACCOUNT_SID:}
+    auth-token: ${TWILIO_AUTH_TOKEN:}
+    # Note epic 23 : TWILIO_WHATSAPP_FROM (numero global) retire. Chaque concession a son
+    # propre numero stocke dans tenant_whatsapp_config et resolu via TwilioWhatsAppService.
+    dry-run: ${TWILIO_DRY_RUN:true}
+    # Note epic 25 : les template SIDs globaux (template-content-sid, template-relance-j1-sid,
+    # template-relance-j3-sid, template-rappel-jour-j-sid) ont ete retires. Chaque tenant
+    # a desormais ses propres SID dans tenant_whatsapp_template.
+    assistant-prenom: ${TWILIO_ASSISTANT_PRENOM:Nora}
+  email-import:
+    # Domaine utilise pour generer les adresses email des concessions (epic 24).
+    # MX record + SendGrid Inbound Parse configures sur ce sous-domaine.
+    domaine: ${EMAIL_IMPORT_DOMAINE:leads-test.leadrive.fr}
+    # Fenetre de deduplication : si un lead avec le meme telephone arrive pour le
+    # meme tenant dans cette fenetre, on enrichit au lieu de creer. Si pas de
+    # telephone, fallback sur l'email. Les deux criteres ne sont JAMAIS combines.
+    deduplication-fenetre-heures: ${EMAIL_IMPORT_DEDUP_HEURES:48}
+    # Rate limiting : nombre max d'emails par heure par concession.
+    # Protection contre le spam ou une boucle de redirection.
+    max-emails-par-heure: ${EMAIL_IMPORT_MAX_PAR_HEURE:50}
+    # Taille max du body email en caracteres (protection memoire).
+    max-body-chars: ${EMAIL_IMPORT_MAX_BODY:50000}
+    # Heartbeat : si aucun email recu depuis X jours pour une concession qui en
+    # recevait avant, log warning + alerte super admin.
+    heartbeat-alerte-jours: ${EMAIL_IMPORT_HEARTBEAT_JOURS:7}

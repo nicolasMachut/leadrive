@@ -1,0 +1,44 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate:
+        physical_naming_strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  ai:
+    anthropic:
+      # Cle bidon pour eviter le fail-fast Spring AI au demarrage
+      api-key: test-anthropic-key
+
+# Cle Clerk fictives — desactive le validateur en pointant sur des valeurs valides en surface
+clerk:
+  jwks-uri: https://test.clerk.test/.well-known/jwks.json
+  issuer: https://test.clerk.test
+  secret-key: sk_test_dummy
+
+leadrevive:
+  frontend-url: http://localhost:3000
+  twilio:
+    account-sid: AC_test
+    auth-token: test_token
+    dry-run: true
+    assistant-prenom: Nora
+
+# Cle de chiffrement bidon pour les tests (32 bytes base64).
+# Ne JAMAIS reutiliser en prod : valeur publique du repo.
+secret:
+  crypto:
+    master-key: eXoX3C+yHeHKkNy90bjAclTiYC28GoBxerEFl/gwhdk=
+
+sentry:
+  dsn: ""
+
+logging:
+  level:
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN
+    org.hibernate.SQL: WARN

@@ -1,0 +1,35 @@
+/.idea/
+
+# Java
+backend/target/
+*.class
+*.jar
+*.war
+
+# Maven
+backend/.mvn/wrapper/maven-wrapper.jar
+
+# Lombok
+*.factorypath
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+**/.claude/settings.local.json
+
+# oh-my-claudecode (OMC)
+.omc/
+**/.omc/

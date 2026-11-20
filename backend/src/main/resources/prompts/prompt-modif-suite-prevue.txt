@@ -1,0 +1,114 @@
+⚠️ NE PAS COMMIT. Je veux valider toutes les modifications avant de committer.
+
+Tu dois modifier les options de "Suite prévue" dans le système de feedback post-RDV existant. On passe de 4 options à 6, plus pertinentes pour une concession automobile.
+
+====================================================================
+BACKEND
+====================================================================
+
+## 1. MODIFIER L'ENUM SuitePrevueEnum
+
+Fichier : chercher SuitePrevueEnum.java dans le projet
+
+Remplacer les valeurs actuelles :
+```java
+// AVANT
+DEVIS_ENVOYE,
+ESSAI_PREVU,
+RELANCER,
+PERDU
+
+// APRÈS
+DEVIS_ENVOYE,
+ESSAI_PREVU,
+RDV_CONCESSION,
+REPRISE_A_EVALUER,
+VENTE_EN_COURS,
+PERDU
+```
+
+## 2. VÉRIFIER LES USAGES
+
+Chercher toutes les références à l'ancien enum dans le projet :
+- Si du code référence RELANCER, le supprimer ou le remapper
+- Vérifier les DTOs, services, controllers qui utilisent SuitePrevueEnum
+- Vérifier qu'aucun filtre ou requête ne dépend des anciennes valeurs
+
+## 3. MIGRATION DB (si nécessaire)
+
+Si la colonne suite_prevue a une contrainte CHECK ou est un ENUM PostgreSQL (pas un VARCHAR), ajouter une migration pour ajouter les nouvelles valeurs et retirer RELANCER.
+
+Si c'est un VARCHAR (vérifier dans la migration existante ou l'entité), aucune migration nécessaire.
+
+====================================================================
+FRONTEND
+====================================================================
+
+## 4. MODIFIER LE COMPOSANT FeedbackRdvSlideUp
+
+Fichier : chercher FeedbackRdvSlideUp.tsx (ou le composant qui affiche l'étape 2 "Suite prévue ?")
+
+Remplacer la grille 2x2 par une grille 2x3 avec les nouvelles options :
+
+```tsx
+// Grille 2x3
+<div className="grid grid-cols-2 gap-3">
+  <button onClick={() => handleSuite("DEVIS_ENVOYE")}
+    className="flex flex-col items-center gap-1 rounded-xl border p-3 transition-colors bg-violet-50 border-violet-200 hover:bg-violet-100">
+    <span className="text-2xl">📋</span>
+    <span className="text-xs font-medium">Devis envoyé</span>
+  </button>
+
+  <button onClick={() => handleSuite("ESSAI_PREVU")}
+    className="flex flex-col items-center gap-1 rounded-xl border p-3 transition-colors bg-green-50 border-green-200 hover:bg-green-100">
+    <span className="text-2xl">🚗</span>
+    <span className="text-xs font-medium">Essai prévu</span>
+  </button>
+
+  <button onClick={() => handleSuite("RDV_CONCESSION")}
+    className="flex flex-col items-center gap-1 rounded-xl border p-3 transition-colors bg-blue-50 border-blue-200 hover:bg-blue-100">
+    <span className="text-2xl">🏢</span>
+    <span className="text-xs font-medium">RDV concession</span>
+  </button>
+
+  <button onClick={() => handleSuite("REPRISE_A_EVALUER")}
+    className="flex flex-col items-center gap-1 rounded-xl border p-3 transition-colors bg-amber-50 border-amber-200 hover:bg-amber-100">
+    <span className="text-2xl">🔄</span>
+    <span className="text-xs font-medium">Reprise à évaluer</span>
+  </button>
+
+  <button onClick={() => handleSuite("VENTE_EN_COURS")}
+    className="flex flex-col items-center gap-1 rounded-xl border p-3 transition-colors bg-emerald-50 border-emerald-200 hover:bg-emerald-100">
+    <span className="text-2xl">✅</span>
+    <span className="text-xs font-medium">Vente en cours</span>
+  </button>
+
+  <button onClick={() => handleSuite("PERDU")}
+    className="flex flex-col items-center gap-1 rounded-xl border p-3 transition-colors bg-red-50 border-red-200 hover:bg-red-100">
+    <span className="text-2xl">❌</span>
+    <span className="text-xs font-medium">Perdu</span>
+  </button>
+</div>
+```
+
+Adapter le style au design existant du composant (utiliser les mêmes classes CSS, variables, tailles que les boutons actuels). La grille doit rester compacte et lisible sur mobile.
+
+## 5. VÉRIFIER LES AUTRES USAGES FRONTEND
+
+Chercher dans tout le frontend les références aux anciennes valeurs :
+- "RELANCER" → supprimer
+- Vérifier les éventuels labels, filtres, ou affichages qui mappent les valeurs enum vers du texte lisible
+- Si un mapping existe (ex: objet JS qui traduit DEVIS_ENVOYE → "Devis envoyé"), ajouter les nouvelles entrées :
+  - RDV_CONCESSION → "RDV concession"
+  - REPRISE_A_EVALUER → "Reprise à évaluer"
+  - VENTE_EN_COURS → "Vente en cours"
+
+====================================================================
+VÉRIFICATIONS
+====================================================================
+
+1. Vérifier que le backend compile
+2. Vérifier que le frontend compile
+3. Vérifier que la grille 2x3 s'affiche correctement sur mobile et desktop
+4. Vérifier que chaque bouton envoie la bonne valeur à l'API
+5. NE PAS COMMIT, attendre validation

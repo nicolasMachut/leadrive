@@ -1,0 +1,1 @@
+ALTER TABLE conversation_analyse ADD COLUMN rdv_confirme BOOLEAN NOT NULL DEFAULT FALSE;

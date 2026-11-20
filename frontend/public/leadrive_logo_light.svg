@@ -1,0 +1,8 @@
+<svg width="210" height="56" viewBox="0 0 210 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Icone 56x56 — palette Atelier : ink square + ember stripes -->
+  <rect width="56" height="56" rx="14" fill="#1A1B23"/>
+  <path d="M4.7 49 Q4.7 53.7 9.3 53.7 L17.5 53.7 Q22.2 53.7 22.2 49 L30.3 9.3 L21 9.3 Z" fill="#D9603A"/>
+  <path d="M35 9.3 L44.3 9.3 L52.5 49 Q52.5 53.7 47.8 53.7 L39.7 53.7 Q35 53.7 35 49 Z" fill="#D9603A" opacity="0.55"/>
+  <!-- Wordmark — Bricolage Grotesque avec fallback systeme. Couleur Ink. -->
+  <text x="72" y="39" font-family="'Bricolage Grotesque', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" font-weight="700" fill="#1A1B23" letter-spacing="-0.7">Leadrive</text>
+</svg>
